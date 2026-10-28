@@ -2,6 +2,9 @@
 
 Git worktree pickers for [Rex](https://www.superlogical.com/rex), driven by [worktrunk](https://github.com/max-sixty/worktrunk): switch to or create a worktree from one key, remove one from another, with a Rex session per worktree.
 
+https://github.com/user-attachments/assets/641a09cc-0809-4ec9-9d0b-5335e44e177d
+
+
 The pickers are ported from the [herdr-worktrunk](https://github.com/devashish2203/herdr-worktrunk) plugin for herdr.
 
 ## Overview
