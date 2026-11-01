@@ -173,6 +173,17 @@ local function close_picker()
   end
 end
 
+-- The script with args. The app runs a key-bound action with its own config
+-- even in a session on another host, so a script under HOME is found from
+-- $HOME on the host the picker runs on.
+local function script_command(...)
+  local home, script = os.getenv("HOME") or "", M.options.script
+  if home ~= "" and script:sub(1, #home + 1) == home .. "/" then
+    return { "/bin/sh", "-c", 'script=$HOME/$1; shift; exec "$script" "$@"', "worktrunk.sh", script:sub(#home + 2), ... }
+  end
+  return { script, ... }
+end
+
 -- Open a floating terminal in the focused terminal's repo running command; a
 -- picker already open is replaced.
 local function open_picker(ctx, command, label)
@@ -222,7 +233,7 @@ end
 
 -- Open the switch / create picker.
 function M.open(ctx)
-  local command = { M.options.script, "pick" }
+  local command = script_command("pick")
   if M.options.base then
     command[#command + 1] = "--base"
     command[#command + 1] = M.options.base
@@ -235,7 +246,7 @@ end
 
 -- Open the remove picker.
 function M.open_remove(ctx)
-  local layer = open_picker(ctx, { M.options.script, "remove" }, "worktree remove")
+  local layer = open_picker(ctx, script_command("remove"), "worktree remove")
   return { layer_id = layer.layer_id }
 end
 
