@@ -63,6 +63,7 @@ require("rex-worktrunk").setup{
   slugify = false,                    -- turn a typed "Fix Login Bug" into fix-login-bug
   bounds  = { 0.15, 0.1, 0.7, 0.8 },  -- x, y, width, height of the float, as fractions of the window
   layout  = nil,                      -- function(name, path) -> layout for a new session
+  label   = nil,                      -- function(path, main) -> session label; main is the main checkout, set when closing a removed worktree
   script  = nil,                      -- the picker script; worktrunk.sh beside init.lua by default
 }
 ```

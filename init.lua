@@ -43,6 +43,10 @@ M.options = {
   -- function(name, path) returning the layout for a new session, built with
   -- rex.layout. The default is one shell started in the worktree.
   layout = nil,
+  -- function(path, main) returning the session label for a worktree directory.
+  -- main is the main checkout when known: on close, path is already removed.
+  -- The default is the directory's name.
+  label = nil,
   -- The picker script. Defaults to worktrunk.sh beside this file.
   script = nil,
 }
@@ -76,6 +80,10 @@ end
 
 local function basename(path)
   return (path:gsub("/+$", ""):match("([^/]+)$"))
+end
+
+local function label_for(path, main)
+  return (M.options.label or basename)(path, main)
 end
 
 local function trim(s)
@@ -119,7 +127,7 @@ end
 
 -- The session for a directory, created if missing. Returns session_id, created.
 local function session_for(path)
-  local name = basename(path)
+  local name = label_for(path)
   local existing = find_session(name)
   if existing then return existing, false end
   local created, err = rex.call("session.create", {
@@ -213,7 +221,7 @@ function M.go(ctx, path)
   local session_id, created = session_for(path)
   local ok, err = pcall(show_in_app, ctx, session_id)
   if not ok then
-    fail("session \"" .. basename(path) .. "\" is ready, but the app would not show it: " .. tostring(err))
+    fail("session \"" .. label_for(path) .. "\" is ready, but the app would not show it: " .. tostring(err))
   end
   return { session_id = session_id, path = path, created = created }
 end
@@ -222,7 +230,7 @@ end
 -- moved to the session for main (the main checkout) first.
 function M.close(ctx, path, main)
   path = expand_home(trim(path or ""))
-  local session_id = find_session(basename(path))
+  local session_id = find_session(label_for(path, main and expand_home(trim(main))))
   if session_id == nil then return { closed = false } end
   if session_id == ctx.session_id and main and is_dir(main) then
     M.go(ctx, main)
@@ -251,7 +259,7 @@ function M.open_remove(ctx)
 end
 
 function M.setup(opts)
-  local known = { layout = true, script = true }
+  local known = { layout = true, script = true, label = true }
   for k in pairs(M.options) do known[k] = true end
   for k, v in pairs(opts or {}) do
     if known[k] then
