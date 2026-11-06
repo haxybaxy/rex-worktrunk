@@ -17,7 +17,7 @@ Worktrunk's lifecycle hooks run as usual, with their output in the float.
 
 ## How it works
 
-- `setup` defines four actions. `worktree` and `worktree_remove` open the pickers in a floating terminal whose working directory is that of the focused terminal, which is how the repo is chosen. `worktree_go` takes a worktree `path` and switches to its session, creating it if needed; `worktree_close` closes the session of a worktree that was removed.
+- `setup` defines four actions. `worktree` and `worktree_remove` open the pickers in a floating terminal whose working directory is that of the focused terminal, which is how the repo is chosen. `worktree_go` takes a worktree `path` and switches to its session, creating it if needed; `worktree_close` closes the session of a worktree that was removed. Sessions are remembered by worktree path in `$XDG_STATE_HOME/rex-worktrunk/sessions` (`~/.local/state` by default), so a session is only reused or closed for the worktree it was opened for; its label is only for display and can be renamed freely.
 - The floats run `worktrunk.sh`, which runs `wt switch --no-cd` or `wt remove --foreground` and hands the result back with `rex do worktree_go` or `rex do worktree_close`. The app accepts a session switch from the CLI only when Remote Control is on. The action can't wait for the pick itself, because Rex stops taking input while a key-bound action runs.
 - The app runs a key-bound action with its own `init.lua`, also in a session on a remote Rex server, so a script under your home directory is started as `$HOME/<the rest of its path>` on the host the float runs on. Clone the plugin to the same place under the home directory on each host.
 - Sessions are labelled after the worktree's directory, such as `repo.feat-demo` with worktrunk's default path template. [rex-sessionizer](https://github.com/haxybaxy/rex-sessionizer) labels sessions the same way, so the two pickers share sessions.
@@ -63,7 +63,7 @@ require("rex-worktrunk").setup{
   slugify = false,                    -- turn a typed "Fix Login Bug" into fix-login-bug
   bounds  = { 0.15, 0.1, 0.7, 0.8 },  -- x, y, width, height of the float, as fractions of the window
   layout  = nil,                      -- function(name, path) -> layout for a new session
-  label   = nil,                      -- function(path, main) -> session label; main is the main checkout, set when closing a removed worktree
+  label   = nil,                      -- function(path) -> label of a new session; the directory name by default
   script  = nil,                      -- the picker script; worktrunk.sh beside init.lua by default
 }
 ```
@@ -84,6 +84,12 @@ rex do worktree_go path=/path/to/repo.feature       # open a worktree's session
 
 ```sh
 bash test/list_test.sh
+```
+
+`test/session_test.lua` checks how sessions are found, reused and closed, against a fake `rex`; it needs only Lua 5.1:
+
+```sh
+lua test/session_test.lua
 ```
 
 ## Upgrade

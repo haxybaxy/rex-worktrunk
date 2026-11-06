@@ -20,7 +20,10 @@
 --   worktree_close   Close the session of a removed worktree:
 --                      rex do worktree_close path=/path/to/repo.feature main=/path/to/repo
 --
--- Sessions are labelled after the worktree directory. The floats run
+-- Each worktree gets its own session, remembered by the worktree's path in
+-- $XDG_STATE_HOME/rex-worktrunk/sessions, so a session is only reused or
+-- closed for the worktree it was made for. The label is only for display:
+-- the directory's name, or the label option's. The floats run
 -- worktrunk.sh, which hands results back with `rex do`; the app accepts a
 -- session switch from the CLI only with Remote Control on (Rex → Settings →
 -- Rex Server). An action can't wait for the pick itself: the app stops taking
@@ -43,9 +46,10 @@ M.options = {
   -- function(name, path) returning the layout for a new session, built with
   -- rex.layout. The default is one shell started in the worktree.
   layout = nil,
-  -- function(path, main) returning the session label for a worktree directory.
-  -- main is the main checkout when known: on close, path is already removed.
-  -- The default is the directory's name.
+  -- function(path) returning the label of a new session for a worktree
+  -- directory. Only used when the session is created; sessions are found by
+  -- path, so renaming one later is fine. The default, and the fallback for a
+  -- nil or empty result, is the directory's name.
   label = nil,
   -- The picker script. Defaults to worktrunk.sh beside this file.
   script = nil,
@@ -82,12 +86,27 @@ local function basename(path)
   return (path:gsub("/+$", ""):match("([^/]+)$"))
 end
 
-local function label_for(path, main)
-  return (M.options.label or basename)(path, main)
-end
-
 local function trim(s)
   return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function label_for(path)
+  if M.options.label then
+    local ok, label = pcall(M.options.label, path)
+    if not ok then
+      rex.log("warn", "rex-worktrunk: label function failed: " .. tostring(label))
+    elseif type(label) == "string" and trim(label) ~= "" then
+      return label
+    end
+  end
+  return basename(path)
+end
+
+-- A worktree directory as the key it is remembered by.
+local function normalize(path)
+  path = expand_home(trim(path or ""))
+  if #path > 1 then path = path:gsub("/+$", "") end
+  return path
 end
 
 local function is_dir(path)
@@ -114,11 +133,51 @@ local function sessions()
   return list.sessions or {}
 end
 
-local function find_session(label)
-  for _, s in ipairs(sessions()) do
-    if s.label == label then return s.session_id end
+-- Which session belongs to which worktree, one "path<TAB>session_id" per line.
+-- Rex keeps no data of its own on a session, so the plugin keeps it in a file;
+-- it outlives config reloads, and entries for sessions gone are dropped.
+local function registry_file()
+  local base = os.getenv("XDG_STATE_HOME")
+  if not base or base == "" then base = (os.getenv("HOME") or "") .. "/.local/state" end
+  return base .. "/rex-worktrunk/sessions"
+end
+
+local function load_registry()
+  local map = {}
+  local f = io.open(registry_file(), "r")
+  if not f then return map end
+  for line in f:lines() do
+    local path, id = line:match("^(.-)\t(%S+)$")
+    if path then map[path] = id end
   end
-  return nil
+  f:close()
+  return map
+end
+
+local function save_registry(map)
+  local file = registry_file()
+  rex.exec{ "mkdir", "-p", (file:match("^(.*)/")) }
+  local paths = {}
+  for path in pairs(map) do paths[#paths + 1] = path end
+  table.sort(paths)
+  local tmp = file .. ".tmp"
+  local f, err = io.open(tmp, "w")
+  if not f then fail("can't save sessions: " .. tostring(err)) end
+  for _, path in ipairs(paths) do f:write(path, "\t", map[path], "\n") end
+  f:close()
+  local ok, rerr = os.rename(tmp, file)
+  if not ok then fail("can't save sessions: " .. tostring(rerr)) end
+end
+
+-- The registry without sessions that no longer exist.
+local function live_registry()
+  local map, alive, changed = load_registry(), {}, false
+  for _, s in ipairs(sessions()) do alive[s.session_id] = true end
+  for path, id in pairs(map) do
+    if not alive[id] then map[path] = nil; changed = true end
+  end
+  if changed then save_registry(map) end
+  return map
 end
 
 local function default_layout(name, path)
@@ -127,14 +186,16 @@ end
 
 -- The session for a directory, created if missing. Returns session_id, created.
 local function session_for(path)
+  local map = live_registry()
+  if map[path] then return map[path], false end
   local name = label_for(path)
-  local existing = find_session(name)
-  if existing then return existing, false end
   local created, err = rex.call("session.create", {
     label = name,
     initial_windows = { { layout = (M.options.layout or default_layout)(name, path) } },
   })
   if created == nil then fail(tostring(err)) end
+  map[path] = created.session_id
+  save_registry(map)
   return created.session_id, true
 end
 
@@ -216,24 +277,29 @@ end
 
 -- Switch the app to the session for a worktree directory, creating it if needed.
 function M.go(ctx, path)
-  path = expand_home(trim(path or ""))
+  path = normalize(path)
   if not is_dir(path) then fail("not a directory: " .. path) end
   local session_id, created = session_for(path)
   local ok, err = pcall(show_in_app, ctx, session_id)
   if not ok then
-    fail("session \"" .. label_for(path) .. "\" is ready, but the app would not show it: " .. tostring(err))
+    fail("session for " .. path .. " is ready, but the app would not show it: " .. tostring(err))
   end
   return { session_id = session_id, path = path, created = created }
 end
 
--- Close the session of a removed worktree. When the app is viewing it, it is
--- moved to the session for main (the main checkout) first.
+-- Close the session of a removed worktree: only one the plugin opened for that
+-- path, never one that merely shares its label. When the app is viewing it, it
+-- is moved to the session for main (the main checkout) first.
 function M.close(ctx, path, main)
-  path = expand_home(trim(path or ""))
-  local session_id = find_session(label_for(path, main and expand_home(trim(main))))
+  path = normalize(path)
+  local map = live_registry()
+  local session_id = map[path]
   if session_id == nil then return { closed = false } end
-  if session_id == ctx.session_id and main and is_dir(main) then
-    M.go(ctx, main)
+  map[path] = nil
+  save_registry(map)
+  if session_id == ctx.session_id and main then
+    main = normalize(main)
+    if main ~= path and is_dir(main) then M.go(ctx, main) end
   end
   destroy_session(session_id)
   return { closed = true, session_id = session_id }
