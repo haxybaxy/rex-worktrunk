@@ -1,0 +1,16 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install luajit worktrunk shellcheck jq fzf
+      - name: Run tests
+        run: bash test/run.sh

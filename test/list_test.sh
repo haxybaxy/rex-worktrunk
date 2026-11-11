@@ -26,6 +26,8 @@ worktree=$(command wt list --format=json -C "$repo" | jq -r '.[] | select(.branc
 failed=0
 
 # same LABEL GOT EXPECTED...
+# sed indents every line of multi-line output, which ${var//…} can't anchor.
+# shellcheck disable=SC2001
 same() {
     local label=$1 got=$2
     shift 2
