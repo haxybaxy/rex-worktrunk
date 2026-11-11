@@ -14,8 +14,9 @@
 #         --base; alt-enter forces the typed name even when it fuzzy-matches.
 #         worktrunk shortcuts (^ default, - previous, pr:N, mr:N, PR/MR URLs)
 #         pass straight through. The worktree then opens as a Rex session via
-#         `rex do worktree_go`, which remembers this float's session
-#         ($REX_SESSION) as the one the worktree was opened from.
+#         `rex do worktree_go`, which is also told the worktree this float
+#         started in, so the plugin can remember this float's session
+#         ($REX_SESSION) as that worktree's and as where the pick came from.
 # remove: fzf over removable worktrees (never the main checkout), then
 #         `wt remove --foreground` with worktrunk's own confirmation and
 #         safety checks, then the worktree's Rex session is closed via
@@ -27,14 +28,23 @@ set -uo pipefail
 # Output helpers
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
-hold()   { printf '\n\033[31m%s\033[0m press any key to close' "$*"; read -r -n1; echo; }
+# Show an error until a key is pressed, so the float doesn't close on it.
+# Without a terminal to press a key in, only print it.
+hold() {
+    if [[ -t 0 ]]; then
+        printf '\n\033[31m%s\033[0m press any key to close' "$*"; read -r -n1; echo
+    else
+        red "$*" >&2
+    fi
+}
 
 need() {
     command -v "$1" >/dev/null 2>&1 || { hold "$1 not found on PATH"; exit 1; }
 }
 
+# True in a worktree, and in a bare repository that keeps its worktrees elsewhere.
 in_repo() {
-    git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    git rev-parse --git-dir >/dev/null 2>&1 \
         || { hold "not a git repository: $PWD"; return 1; }
 }
 
@@ -168,17 +178,30 @@ pick() {
         hold "wt switch failed (see above)."; return 1
     fi
 
-    local wtpath
+    # The branch is worktrunk's answer, not $name, which may be a shortcut.
+    local items wtpath branch
+    items=$(wt_items)
     wtpath=$(jq -r '.path // empty' <<<"$result" 2>/dev/null)
+    branch=$(jq -r '.branch // empty' <<<"$result" 2>/dev/null)
     if [[ -z $wtpath ]]; then
-        wtpath=$(wt_items | jq -r --arg b "$name" 'select(.branch == $b and .kind == "worktree") | .path' | head -n1)
+        wtpath=$(jq -r --arg b "${branch:-$name}" 'select(.kind == "worktree" and .branch == $b) | .path' <<<"$items" | head -n1)
     fi
     if [[ -z $wtpath ]]; then
         hold "worktrunk returned no worktree path for: $name"; return 1
     fi
 
+    # Besides the path: the worktree this float started in, and the branch and
+    # main checkout for the label and layout options. Each only when known.
+    local from mainpath goargs
+    from=$(git rev-parse --show-toplevel 2>/dev/null)
+    mainpath=$(jq -r 'select(.kind == "worktree" and .is_main == true) | .path' <<<"$items" | head -n1)
+    goargs=(path="$wtpath")
+    [[ -n $from ]]     && goargs+=(from="$from")
+    [[ -n $branch ]]   && goargs+=(branch="$branch")
+    [[ -n $mainpath ]] && goargs+=(main="$mainpath")
+
     # shellcheck disable=SC1010
-    if ! rex do worktree_go path="$wtpath" >/dev/null; then
+    if ! rex do worktree_go "${goargs[@]}" >/dev/null; then
         hold "Could not open a session for $wtpath."; return 1
     fi
 }

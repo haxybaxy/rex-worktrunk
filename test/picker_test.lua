@@ -149,14 +149,24 @@ do
     t.show(fake:warnings()))
   t.check("declares the actions' arguments",
     fake.actions.worktree_go.args.path == "string"
+      and fake.actions.worktree_go.args.from == "string?"
+      and fake.actions.worktree_go.args.branch == "string?"
+      and fake.actions.worktree_go.args.main == "string?"
       and fake.actions.worktree_close.args.path == "string"
       and fake.actions.worktree_close.args.main == "string?")
 end
 
 do
+  local M = fresh{ label = "a string", remotes = "yes", base = false }
+  t.check("warns about an option of the wrong type and keeps the default",
+    #fake:warnings() == 2 and M.options.label == nil and M.options.remotes == false and M.options.base == false,
+    t.show(fake:warnings()))
+end
+
+do
   fresh{ script = "/opt/wt/worktrunk.sh" }
   fake.dirs = { [REPO .. ".fix"] = true }
-  local opened = fake.actions.worktree_go.run(ctx, { path = REPO .. ".fix" })
+  local opened = fake.actions.worktree_go.run(ctx, { path = REPO .. ".fix", branch = "fix" })
   local closed = fake.actions.worktree_close.run(ctx, { path = REPO .. ".fix", main = REPO })
   local picker = fake.actions.worktree.run(ctx, {})
   local remover = fake.actions.worktree_remove.run(ctx, {})

@@ -17,16 +17,22 @@
 --                    then the worktree's Rex session is closed.
 --   worktree_go      Open the session for a worktree directory:
 --                      rex do worktree_go path=/path/to/repo.feature
+--                    The pickers also pass from, branch and main (see M.go).
 --   worktree_close   Close the session of a removed worktree:
 --                      rex do worktree_close path=/path/to/repo.feature main=/path/to/repo
 --
 -- How sessions are tracked:
---   Each worktree gets its own session, remembered by the worktree's path in a
---   registry file (see Registry below) together with its origin: the session it
---   was opened from. A session is only reused or closed for the worktree it was
---   made for; its label is only for display. Closing the session you are in
---   takes the app back to the origin. Sessions this plugin didn't open are never
---   reused or closed.
+--   Each worktree has one session, remembered by the worktree's path in a
+--   registry file (see Registry below). Sessions are never found by label: a
+--   label is only what a new session is called, and renaming it changes nothing.
+--     * A session the plugin creates for a worktree is opened again on the next
+--       pick and closed when the worktree is removed. It remembers its origin,
+--       the session it was opened from; closing the session you are in takes
+--       the app back there.
+--     * The session a picker is used from is adopted for the worktree its
+--       terminal was in, unless that worktree or that session is already
+--       remembered. Picking that worktree later goes back to it instead of
+--       opening a second session. An adopted session is never closed.
 --
 -- How the pickers hand back:
 --   The floats run worktrunk.sh, which hands results back with `rex do`; the
@@ -55,20 +61,34 @@ M.options = {
   slugify = false,
   -- Where the pickers float: x, y, width, height as fractions of the window.
   bounds = { 0.15, 0.1, 0.7, 0.8 },
-  -- function(label, path) returning the layout for a new session, built with
-  -- rex.layout. The default is one shell started in the worktree.
+  -- function(label, path, worktree) returning the layout for a new session,
+  -- built with rex.layout. The default is one shell started in the worktree.
   layout = nil,
-  -- function(path) returning the label of a new session for a worktree
-  -- directory. Only used when the session is created; sessions are found by
-  -- path, so renaming one later is fine. The default, and the fallback for a
-  -- nil, empty or failing result, is the directory's name.
+  -- function(path, worktree) returning the label of a new session. It is only
+  -- called when a session is created, and never used to find one. The default,
+  -- and the fallback for a nil, empty, failing or refused result, is the
+  -- directory's name.
   label = nil,
   -- The picker script. Defaults to worktrunk.sh beside this file.
   script = nil,
 }
 
--- Every option setup accepts. Those that default to nil aren't keys of M.options.
-local OPTION_NAMES = { "base", "remotes", "slugify", "bounds", "layout", "label", "script" }
+-- The worktree table given to label and layout:
+--   path    the worktree's directory
+--   branch  its branch, or nil when the request didn't say
+--   main    the repo's main checkout, or nil when the request didn't say
+-- The pickers always say; `rex do worktree_go path=…` alone doesn't.
+
+-- Every option setup accepts, and the types its value may have.
+local OPTION_TYPES = {
+  base    = { "string", "boolean" },
+  remotes = { "boolean" },
+  slugify = { "boolean" },
+  bounds  = { "table" },
+  layout  = { "function" },
+  label   = { "function" },
+  script  = { "string" },
+}
 
 local SHELL_FLAVOR     = "com.superlogical.terminal.shell"
 local TERMINAL_CREATOR = "com.superlogical.terminal"
@@ -103,8 +123,14 @@ local function normalize_path(path)
   return path
 end
 
+-- Whether a normalized path can be a registry key: absolute, and without the
+-- characters that separate the registry's fields and lines.
+local function is_trackable(path)
+  return path:sub(1, 1) == "/" and not path:find("%c")
+end
+
 local function basename(path)
-  return (path:gsub("/+$", ""):match("([^/]+)$"))
+  return path:match("([^/]+)/*$") or path
 end
 
 -- The directory this file is in. Rex names a module's chunk by its absolute
@@ -142,43 +168,33 @@ local function focused_terminal_cwd(block_id)
   return nil
 end
 
-local function list_sessions()
-  local list, err = rex.call("session.list")
-  if list == nil then raise(tostring(err)) end
-  return list.sessions or {}
-end
-
 -- The IDs of the sessions that exist right now, as a set.
 local function live_session_ids()
+  local list, err = rex.call("session.list")
+  if list == nil then raise(tostring(err)) end
   local ids = {}
-  for _, s in ipairs(list_sessions()) do ids[s.session_id] = true end
+  for _, s in ipairs(list.sessions or {}) do ids[s.session_id] = true end
   return ids
-end
-
--- The first session with this label, other than except.
-local function session_labelled(label, except)
-  for _, s in ipairs(list_sessions()) do
-    if s.label == label and s.session_id ~= except then return s.session_id end
-  end
-  return nil
 end
 
 --------------------------------------------------------------------------------
 -- Session registry
 --
--- Which session belongs to which worktree, and where it was opened from. Rex
--- keeps no data of its own on a session, and a key-bound action runs in the
--- app while `rex do` runs on the server, so the plugin keeps it in a file both
--- can read:
+-- Which session belongs to which worktree. Rex keeps no data of its own on a
+-- session, and a key-bound action runs in the app while `rex do` runs on the
+-- server, so the plugin keeps it in a file both can read:
 --
 --   $XDG_STATE_HOME/rex-worktrunk/sessions        (~/.local/state by default)
 --
--- One line per worktree, tab-separated: the worktree's path, its session, and
--- optionally its origin, the session it was opened from:
+-- One line per worktree, tab-separated: the worktree's path, its session, the
+-- session it was opened from (its origin, may be empty), and "adopted" when
+-- the plugin didn't create the session:
 --
 --   /src/app.fix-login<TAB>session:0193…<TAB>session:0192…
+--   /src/app<TAB>session:0192…<TAB><TAB>adopted
 --
--- In memory the registry is { [path] = { session = id, origin = id or nil } }.
+-- In memory the registry is
+--   { [path] = { session = id, origin = id or nil, adopted = true or nil } }.
 --------------------------------------------------------------------------------
 
 local Registry = {}
@@ -194,9 +210,15 @@ function Registry.load()
   local f = io.open(Registry.file(), "r")
   if not f then return entries end
   for line in f:lines() do
-    local path, session, origin = line:match("^(.-)\t([^\t]+)\t?([^\t]*)$")
-    if path and path ~= "" then
-      entries[path] = { session = session, origin = origin ~= "" and origin or nil }
+    local fields = {}
+    for field in (line .. "\t"):gmatch("([^\t]*)\t") do fields[#fields + 1] = field end
+    local path, session, origin, kind = fields[1], fields[2], fields[3], fields[4]
+    if path ~= "" and session and session ~= "" then
+      entries[path] = {
+        session = session,
+        origin  = origin ~= "" and origin or nil,
+        adopted = kind == "adopted" or nil,
+      }
     end
   end
   f:close()
@@ -220,9 +242,10 @@ function Registry.save(entries)
   table.sort(paths)
   for _, path in ipairs(paths) do
     local entry = entries[path]
-    f:write(path, "\t", entry.session)
-    if entry.origin then f:write("\t", entry.origin) end
-    f:write("\n")
+    local line = { path, entry.session }
+    if entry.origin or entry.adopted then line[3] = entry.origin or "" end
+    if entry.adopted then line[4] = "adopted" end
+    f:write(table.concat(line, "\t"), "\n")
   end
   f:close()
   local ok, err = os.rename(tmp, file)
@@ -235,15 +258,27 @@ end
 -- The registry without the worktrees whose session no longer exists, and the
 -- set of live session IDs it was checked against.
 function Registry.load_live()
-  local entries, live, changed = Registry.load(), live_session_ids(), false
+  local entries, live, pruned = Registry.load(), live_session_ids(), false
   for path, entry in pairs(entries) do
     if not live[entry.session] then
       entries[path] = nil
-      changed = true
+      pruned = true
     end
   end
-  if changed then Registry.save(entries) end
+  if pruned then Registry.save(entries) end
   return entries, live
+end
+
+-- Remember session_id, a session the plugin didn't create, as the session of
+-- the worktree at path. A worktree keeps the session it has, and a session
+-- belongs to one worktree only. Returns whether anything changed.
+function Registry.adopt(entries, path, session_id)
+  if entries[path] then return false end
+  for _, entry in pairs(entries) do
+    if entry.session == session_id then return false end
+  end
+  entries[path] = { session = session_id, adopted = true }
+  return true
 end
 
 --------------------------------------------------------------------------------
@@ -251,66 +286,58 @@ end
 --------------------------------------------------------------------------------
 
 -- The label of a new session: the label option's, else the directory's name.
-local function label_for(path)
-  if M.options.label then
-    local ok, label = pcall(M.options.label, path)
-    if not ok then
-      warn("label function failed: " .. tostring(label))
-    elseif type(label) == "string" and trim(label) ~= "" then
-      return label
-    end
+local function session_label(worktree)
+  local default = basename(worktree.path)
+  if not M.options.label then return default end
+  local ok, label = pcall(M.options.label, worktree.path, worktree)
+  if not ok then
+    warn("label function failed: " .. tostring(label))
+    return default
   end
-  return basename(path)
+  if label == nil then return default end
+  if type(label) ~= "string" then
+    warn("label function returned a " .. type(label) .. ", not a string")
+    return default
+  end
+  label = trim(label:gsub("%c+", " "))
+  return label ~= "" and label or default
 end
 
 local function default_layout(_label, path)
   return rex.layout.block{ flavor = SHELL_FLAVOR, options = { cwd = path } }
 end
 
-local function create_session(path)
-  local label = label_for(path)
-  local created, err = rex.call("session.create", {
-    label = label,
-    initial_windows = { { layout = (M.options.layout or default_layout)(label, path) } },
-  })
+local function session_layout(label, worktree)
+  if not M.options.layout then return default_layout(label, worktree.path) end
+  local ok, layout = pcall(M.options.layout, label, worktree.path, worktree)
+  if not ok then raise("layout function failed: " .. tostring(layout)) end
+  return layout
+end
+
+-- Create the session for a worktree and return its ID. A label Rex refuses,
+-- one that is too long for instance, is replaced by the directory's name.
+local function create_session(worktree)
+  local label = session_label(worktree)
+  local windows = { { layout = session_layout(label, worktree) } }
+  local created, err = rex.call("session.create", { label = label, initial_windows = windows })
+  local default = basename(worktree.path)
+  if created == nil and label ~= default then
+    warn("could not create a session labelled \"" .. label .. "\" (" .. tostring(err)
+      .. "); trying \"" .. default .. "\"")
+    created, err = rex.call("session.create", { label = default, initial_windows = windows })
+  end
   if created == nil then raise(tostring(err)) end
   return created.session_id
 end
 
--- The session for a worktree directory, created when the registry has none.
--- origin is the session the request came from. It is remembered when the
--- session is created, and replaces a remembered origin that no longer exists.
--- Returns session_id, created.
-local function worktree_session(path, origin)
-  local entries, live = Registry.load_live()
-  local entry = entries[path]
-  if entry then
-    if origin and origin ~= entry.session and not live[entry.origin] then
-      entry.origin = origin
-      Registry.save(entries)
-    end
-    return entry.session, false
-  end
-  local session_id = create_session(path)
-  entries[path] = { session = session_id, origin = origin }
-  Registry.save(entries)
-  return session_id, true
-end
-
--- Where the app goes when the session it is viewing is closed, in order:
---   1. the origin, the session the worktree was opened from;
---   2. the session this plugin opened for the main checkout;
---   3. a session labelled the way this plugin would label the main checkout.
--- nil when none of them exists: a session is never created just to leave one.
+-- Where the app goes when the session it is viewing is closed: the origin,
+-- the session the worktree was opened from, else the main checkout's session.
+-- nil when neither exists: a session is never created just to leave one.
 local function return_destination(entry, main, entries, live)
   local function usable(id) return id ~= nil and id ~= entry.session and live[id] == true end
   if usable(entry.origin) then return entry.origin end
-  if main and main ~= "" then
-    local main_entry = entries[main]
-    if main_entry and usable(main_entry.session) then return main_entry.session end
-    local labelled = session_labelled(label_for(main), entry.session)
-    if usable(labelled) then return labelled end
-  end
+  local main_entry = main and entries[main]
+  if main_entry and usable(main_entry.session) then return main_entry.session end
   return nil
 end
 
@@ -416,51 +443,87 @@ end
 --------------------------------------------------------------------------------
 
 -- Switch the app to the session for a worktree directory, creating it if
--- needed. A new session remembers the session the request came from as its
--- origin.
-function M.go(ctx, path)
+-- needed. request may hold, all optional:
+--   from    the worktree the request was made in. The session the request
+--           came from is adopted for it (see Registry.adopt).
+--   branch  the worktree's branch, for the label and layout options.
+--   main    the repo's main checkout, likewise.
+-- A new session remembers the session the request came from as its origin; so
+-- does an existing one whose origin no longer exists.
+function M.go(ctx, path, request)
+  request = request or {}
   path = normalize_path(path)
+  if not is_trackable(path) then raise("not an absolute path: " .. path) end
   if not is_directory(path) then raise("not a directory: " .. path) end
-  local session_id, created = worktree_session(path, ctx.session_id)
-  local ok, err = pcall(show_session_in_app, ctx, session_id)
+
+  local entries, live = Registry.load_live()
+  local here = live[ctx.session_id] and ctx.session_id or nil
+  local changed, created = false, false
+
+  local from = request.from and normalize_path(request.from)
+  if here and from and is_trackable(from) then
+    changed = Registry.adopt(entries, from, here)
+  end
+
+  local entry = entries[path]
+  if entry == nil then
+    local worktree = {
+      path   = path,
+      branch = request.branch,
+      main   = request.main and normalize_path(request.main),
+    }
+    entry = { session = create_session(worktree), origin = here }
+    entries[path] = entry
+    changed, created = true, true
+  elseif here and here ~= entry.session and not live[entry.origin] then
+    entry.origin = here
+    changed = true
+  end
+  if changed then Registry.save(entries) end
+
+  local ok, err = pcall(show_session_in_app, ctx, entry.session)
   if not ok then
     raise("session for " .. path .. " is ready, but the app would not show it: " .. tostring(err))
   end
-  return { session_id = session_id, path = path, created = created }
+  return { session_id = entry.session, path = path, created = created }
 end
 
--- Close the session this plugin opened for a removed worktree. When the
+-- Close the session this plugin created for a removed worktree. When the
 -- request came from that session, the app is viewing it, so the app is first
 -- moved to return_destination. main is the main checkout, a fallback for when
--- the origin is gone.
+-- the origin is gone. An adopted session is forgotten, not closed.
 function M.close(ctx, path, main)
   path = normalize_path(path)
   if main then main = normalize_path(main) end
   local entries, live = Registry.load_live()
   local entry = entries[path]
   if entry == nil then return { closed = false } end
-  entries[path] = nil
-  Registry.save(entries)
 
   local moved_to
-  if ctx.session_id == entry.session then
-    moved_to = return_destination(entry, main, entries, live)
-    if moved_to then
-      local ok, err = pcall(show_session_in_app, ctx, moved_to)
-      if not ok then
-        warn("could not move the app to " .. moved_to .. ": " .. tostring(err))
-        moved_to = nil
+  if not entry.adopted then
+    if ctx.session_id == entry.session then
+      moved_to = return_destination(entry, main, entries, live)
+      if moved_to then
+        local ok, err = pcall(show_session_in_app, ctx, moved_to)
+        if not ok then
+          warn("could not move the app to " .. moved_to .. ": " .. tostring(err))
+          moved_to = nil
+        end
       end
     end
+    -- Raises when the session survives; the worktree then stays remembered,
+    -- so closing can be tried again.
+    destroy_session(entry.session)
   end
-  destroy_session(entry.session)
-  return { closed = true, session_id = entry.session, moved_to = moved_to }
+  entries[path] = nil
+  Registry.save(entries)
+  return { closed = not entry.adopted, session_id = entry.session, moved_to = moved_to }
 end
 
 -- Open the switch / create picker.
 function M.open(ctx)
   local args = { "pick" }
-  if M.options.base then
+  if type(M.options.base) == "string" and M.options.base ~= "" then
     args[#args + 1] = "--base"
     args[#args + 1] = M.options.base
   end
@@ -477,13 +540,17 @@ function M.open_remove(ctx)
 end
 
 function M.setup(opts)
-  local known = {}
-  for _, name in ipairs(OPTION_NAMES) do known[name] = true end
   for name, value in pairs(opts or {}) do
-    if known[name] then
-      M.options[name] = value
-    else
+    local types = OPTION_TYPES[name]
+    local fits = false
+    for _, t in ipairs(types or {}) do fits = fits or type(value) == t end
+    if not types then
       warn("ignoring unknown option " .. tostring(name))
+    elseif not fits then
+      warn("ignoring option " .. name .. ": expected a " .. table.concat(types, " or ")
+        .. ", got a " .. type(value))
+    else
+      M.options[name] = value
     end
   end
   M.options.script = expand_home(M.options.script or (plugin_dir() .. "/worktrunk.sh"))
@@ -511,14 +578,14 @@ function M.setup(opts)
     title       = "Open Worktree Session",
     description = "Switch to the session for a worktree directory, creating it if needed.",
     category    = "Worktree",
-    args        = { path = "string" },
-    run = function(ctx, args) return M.go(ctx, args.path) end,
+    args        = { path = "string", from = "string?", branch = "string?", main = "string?" },
+    run = function(ctx, args) return M.go(ctx, args.path, args) end,
   }
 
   rex.action{
     name        = "worktree_close",
     title       = "Close Worktree Session",
-    description = "Close the session of a removed worktree. If the app is viewing it, it goes back to the session the worktree was opened from first.",
+    description = "Close the session opened for a removed worktree. If the app is viewing it, it first goes back to the session the worktree was opened from.",
     category    = "Worktree",
     args        = { path = "string", main = "string?" },
     run = function(ctx, args) return M.close(ctx, args.path, args.main) end,

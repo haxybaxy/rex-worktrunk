@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs every check: the Lua tests against a fake rex, the pickers' lists on a
+# Runs every check: the Lua tests against a fake rex, worktrunk.sh on a
 # throwaway repository, and shellcheck on the scripts. Exits non-zero if any
 # of them fails.
 #
@@ -32,7 +32,7 @@ else
     done
 fi
 
-step test/list_test.sh bash test/list_test.sh
+step test/worktrunk_test.sh bash test/worktrunk_test.sh
 
 if command -v shellcheck >/dev/null 2>&1; then
     step shellcheck shellcheck worktrunk.sh test/*.sh

@@ -59,9 +59,16 @@ end
 
 do
   local M = fresh()
+  local err = t.error_of(M.go, from(nil), "app.fix")
+  t.check("refuses a path that isn't absolute",
+    err and err:find("not an absolute path: app.fix", 1, true) and #fake:calls_to("session.create") == 0, err)
+end
+
+do
+  local M = fresh()
   local lookalike = fake:add_session("app.fix")
   local opened = M.go(from(nil), FIX)
-  t.check("never adopts a session it didn't create, even with the same label",
+  t.check("never takes a session for the worktree's because of its label",
     opened.created and opened.session_id ~= lookalike)
 end
 
@@ -78,6 +85,29 @@ do
   local M = fresh{ label = function(path) return "app 󰙅 " .. path:match("([^/]+)$") end }
   M.go(from(nil), FIX)
   t.check("uses the label option for a new session", fake.sessions[1].label == "app 󰙅 app.fix", fake.sessions[1].label)
+end
+
+do
+  local seen
+  local M = fresh{ label = function(path, worktree) seen = { path, worktree }; return worktree.branch end }
+  M.go(from(nil), FIX, { branch = "fix/login", main = MAIN .. "/" })
+  t.check("gives the label option the path, branch and main checkout",
+    seen and seen[1] == FIX and seen[2].path == FIX and seen[2].branch == "fix/login" and seen[2].main == MAIN
+      and fake.sessions[1].label == "fix/login", t.show(fake:labels()))
+end
+
+do
+  local M = fresh{ label = function() return "  fix\n\tlogin " end }
+  M.go(from(nil), FIX)
+  t.check("tidies whitespace in a label", fake.sessions[1].label == "fix login", fake.sessions[1].label)
+end
+
+do
+  local M = fresh{ label = function() return ("x"):rep(200) end }
+  local opened = M.go(from(nil), FIX)
+  t.check("falls back to the directory name when Rex refuses the label, with a warning",
+    opened.created and #fake.sessions == 1 and fake.sessions[1].label == "app.fix" and #fake:warnings() == 1,
+    t.show(fake:labels()))
 end
 
 for name, label in pairs{
@@ -101,11 +131,21 @@ end
 
 do
   local seen
-  local M = fresh{ layout = function(label, path) seen = { label, path }; return { block = { flavor = "x" } } end }
-  M.go(from(nil), FIX)
+  local M = fresh{ layout = function(label, path, worktree)
+    seen = { label, path, worktree }
+    return { block = { flavor = "x" } }
+  end }
+  M.go(from(nil), FIX, { branch = "fix/login" })
   t.check("builds a new session's layout with the layout option",
-    seen and seen[1] == "app.fix" and seen[2] == FIX
+    seen and seen[1] == "app.fix" and seen[2] == FIX and seen[3].branch == "fix/login"
       and fake:calls_to("session.create")[1].args.initial_windows[1].layout.block.flavor == "x")
+end
+
+do
+  local M = fresh{ layout = function() error("boom") end }
+  local err = t.error_of(M.go, from(nil), FIX)
+  t.check("reports a failing layout function without creating a session",
+    err and err:find("layout function failed", 1, true) and #fake.sessions == 0, err)
 end
 
 --------------------------------------------------------------------------------
@@ -140,6 +180,67 @@ do
   local fix = M.go(from(nil), FIX).session_id
   t.check("records no origin when the request came from no session",
     t.same_list(fake:registry_lines(), { FIX .. "\t" .. fix }), t.show(fake:registry_lines()))
+end
+
+--------------------------------------------------------------------------------
+t.section("adopting the session a pick came from")
+--------------------------------------------------------------------------------
+
+do
+  -- The duplicate this prevents: a session someone made for the main checkout,
+  -- a worktree opened from it, then the main checkout's branch picked there.
+  local M = fresh()
+  local home = fake:add_session("renamed, so no label would find it")
+  local fix = M.go(from(home), FIX, { from = MAIN }).session_id
+  t.check("remembers the session a pick came from as its worktree's",
+    t.same_list(fake:registry_lines(), { MAIN .. "\t" .. home .. "\t\tadopted", FIX .. "\t" .. fix .. "\t" .. home }),
+    t.show(fake:registry_lines()))
+
+  local back = M.go(from(fix), MAIN, { from = FIX })
+  t.check("goes back to it instead of opening a second session",
+    back.session_id == home and not back.created and #fake:calls_to("session.create") == 1)
+
+  t.check("forgets it without closing it when its worktree is removed",
+    not M.close(from(fix), MAIN).closed and fake:session(home) ~= nil
+      and t.same_list(fake:registry_lines(), { FIX .. "\t" .. fix .. "\t" .. home }), t.show(fake:registry_lines()))
+end
+
+do
+  local M = fresh()
+  local home = fake:add_session("home")
+  local opened = M.go(from(home), MAIN, { from = MAIN })
+  t.check("picking the worktree you are in stays in the session",
+    opened.session_id == home and not opened.created and #fake.sessions == 1)
+end
+
+do
+  local M = fresh()
+  local home = fake:add_session("home")
+  local fix = M.go(from(home), FIX, { from = MAIN }).session_id
+  -- A terminal of the main checkout's session has wandered into another worktree.
+  local feat = M.go(from(home), FEAT, { from = FIX }).session_id
+  t.check("a worktree keeps the session it has",
+    M.go(from(feat), FIX).session_id == fix and M.go(from(feat), MAIN).session_id == home)
+  -- And a terminal of fix's session into a worktree that has no session yet.
+  M.go(from(fix), MAIN, { from = "/src/app.other" })
+  t.check("a session belongs to one worktree only", #fake:registry_lines() == 3, t.show(fake:registry_lines()))
+end
+
+do
+  local M = fresh()
+  M.go(from(nil), FIX, { from = MAIN })
+  M.go(from("session:gone"), FEAT, { from = MAIN })
+  t.check("adopts nothing when the pick came from no session, or one that is gone",
+    #fake:registry_lines() == 2 and not fake:registry_lines()[1]:find("adopted", 1, true),
+    t.show(fake:registry_lines()))
+end
+
+do
+  local M = fresh()
+  local home = fake:add_session("home")
+  local fix = M.go(from(home), FIX, { from = MAIN }).session_id
+  t.check("closing goes back to the adopted session it was opened from",
+    M.close(from(fix), FIX, MAIN).moved_to == home)
 end
 
 --------------------------------------------------------------------------------
@@ -189,14 +290,26 @@ end
 do
   local M = fresh()
   local home = fake:add_session("home")
+  local main = fake:add_session("the main checkout, made by hand")
+  M.go(from(main), FEAT, { from = MAIN })
   local fix = M.go(from(home), FIX).session_id
   fake:remove_session(home)
-  local main = fake:add_session("app")
   fake.calls = {}
   local result = M.close(from(fix), FIX, MAIN)
-  t.check("then to a session labelled the way the plugin labels the main checkout",
+  t.check("or to the session adopted for the main checkout",
     result.moved_to == main and t.same_list(fake:selected(), { main }), t.show(fake:selected()))
-  t.check("without tracking or closing that session", fake:session(main) ~= nil and #fake:registry_lines() == 0)
+end
+
+do
+  local M = fresh()
+  local home = fake:add_session("home")
+  local fix = M.go(from(home), FIX).session_id
+  fake:remove_session(home)
+  local lookalike = fake:add_session("app")
+  fake.calls = {}
+  local result = M.close(from(fix), FIX, MAIN)
+  t.check("never to a session that only has the main checkout's label",
+    result.closed and result.moved_to == nil and #fake:selected() == 0 and fake:session(lookalike) ~= nil)
 end
 
 do
@@ -246,6 +359,9 @@ do
   local err = t.error_of(M.close, from(nil), FIX, MAIN)
   t.check("reports a session that could not be destroyed",
     err and err:find("permission denied", 1, true) and fake:session(fix) ~= nil, err)
+  t.check("and still remembers it, so closing can be tried again", #fake:registry_lines() == 1)
+  fake.intercept = {}
+  t.check("which then works", M.close(from(nil), FIX, MAIN).closed and fake:session(fix) == nil)
 end
 
 do
@@ -331,6 +447,15 @@ do
   local legacy = fake:add_session("app.fix")
   fake:write_registry{ FIX .. "\t" .. legacy }
   t.check("reads lines without an origin", M.go(from(nil), FIX).session_id == legacy)
+  t.check("and closes their sessions", M.close(from(nil), FIX).closed and fake:session(legacy) == nil)
+end
+
+do
+  local M = fresh()
+  local home = fake:add_session("home")
+  fake:write_registry{ MAIN .. "\t" .. home .. "\t\tadopted", "", "no session", "\tsession:9" }
+  t.check("reads adopted lines and skips broken ones",
+    M.go(from(nil), MAIN).session_id == home and not M.close(from(nil), MAIN).closed and fake:session(home) ~= nil)
 end
 
 do

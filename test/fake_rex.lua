@@ -169,6 +169,8 @@ function methods.session_list(fake)
 end
 
 function methods.session_create(fake, args)
+  -- As the server does: a label has at most 128 characters.
+  if #(args.label or "") > 128 then return nil, "label is too long" end
   local id = fake:add_session(args.label)
   return { session_id = id }
 end
