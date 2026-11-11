@@ -11,16 +11,18 @@ The pickers are ported from the [herdr-worktrunk](https://github.com/devashish22
 
 **Switch or create.** Press the key in a terminal inside a repo and a floating [fzf](https://github.com/junegunn/fzf) picker lists the repo's worktrees and local branches. Press <kbd>Enter</kbd> on a match to switch to it: Rex opens a session for the worktree, creating the worktree first when the branch has none. Type a name that matches nothing and press <kbd>Enter</kbd> to create a branch and worktree for it, from the current branch by default. When the name you want fuzzy-matches an existing branch (you want `pgx` but `pgx-bump` exists), <kbd>Alt</kbd>+<kbd>Enter</kbd> forces the typed name. Worktrunk's shortcuts work too: `^` for the default branch, `-` for the previous one, `pr:N` and `mr:N` for pull and merge requests, and PR/MR URLs.
 
-**Remove.** The second key lists the removable worktrees, never the main checkout. Pick one and worktrunk removes it, with its own checks: it refuses unmerged branches and dirty worktrees, and asks when it needs to. The worktree's Rex session is closed afterwards; if you were in it, Rex moves you to the main checkout's session first.
+**Remove.** The second key lists the removable worktrees, never the main checkout. Pick one and worktrunk removes it, with its own checks: it refuses unmerged branches and dirty worktrees, and asks when it needs to. The worktree's Rex session is closed afterwards; if you were in it, Rex first takes you back to the session you opened the worktree from.
 
 Worktrunk's lifecycle hooks run as usual, with their output in the float.
 
 ## How it works
 
-- `setup` defines four actions. `worktree` and `worktree_remove` open the pickers in a floating terminal whose working directory is that of the focused terminal, which is how the repo is chosen. `worktree_go` takes a worktree `path` and switches to its session, creating it if needed; `worktree_close` closes the session of a worktree that was removed. Sessions are remembered by worktree path in `$XDG_STATE_HOME/rex-worktrunk/sessions` (`~/.local/state` by default), so a session is only reused or closed for the worktree it was opened for; its label is only for display and can be renamed freely.
+- `setup` defines four actions. `worktree` and `worktree_remove` open the pickers in a floating terminal whose working directory is that of the focused terminal, which is how the repo is chosen. `worktree_go` takes a worktree `path` and switches to its session, creating it if needed; `worktree_close` closes the session of a worktree that was removed.
+- Each worktree's session is remembered by the worktree's path in `$XDG_STATE_HOME/rex-worktrunk/sessions` (`~/.local/state` by default), one tab-separated line per worktree: its path, its session, and the session it was opened from. A session is only reused or closed for the worktree it was opened for, and sessions the plugin didn't open are never touched; a session's label is only for display and can be renamed freely.
+- When you close the session you are in, the app goes back to the session the worktree was opened from. If that one is gone, it goes to the main checkout's session: the one the plugin opened for it, else one labelled the way the plugin would label it. If there is none, the session is closed and Rex picks where you land; a session is never created just to leave one.
 - The floats run `worktrunk.sh`, which runs `wt switch --no-cd` or `wt remove --foreground` and hands the result back with `rex do worktree_go` or `rex do worktree_close`. The app accepts a session switch from the CLI only when Remote Control is on. The action can't wait for the pick itself, because Rex stops taking input while a key-bound action runs.
 - The app runs a key-bound action with its own `init.lua`, also in a session on a remote Rex server, so a script under your home directory is started as `$HOME/<the rest of its path>` on the host the float runs on. Clone the plugin to the same place under the home directory on each host.
-- Sessions are labelled after the worktree's directory, such as `repo.feat-demo` with worktrunk's default path template. [rex-sessionizer](https://github.com/haxybaxy/rex-sessionizer) labels sessions the same way, so the two pickers share sessions.
+- New sessions are labelled after the worktree's directory, such as `repo.feat-demo` with worktrunk's default path template, unless the `label` option says otherwise.
 
 ## Install
 
@@ -62,7 +64,7 @@ require("rex-worktrunk").setup{
   remotes = false,                    -- also offer remote-tracking branches (run git fetch yourself)
   slugify = false,                    -- turn a typed "Fix Login Bug" into fix-login-bug
   bounds  = { 0.15, 0.1, 0.7, 0.8 },  -- x, y, width, height of the float, as fractions of the window
-  layout  = nil,                      -- function(name, path) -> layout for a new session
+  layout  = nil,                      -- function(label, path) -> layout for a new session
   label   = nil,                      -- function(path) -> label of a new session; the directory name by default
   script  = nil,                      -- the picker script; worktrunk.sh beside init.lua by default
 }
@@ -76,21 +78,27 @@ A `layout` function builds the first window of a new session with `rex.layout`; 
 rex do worktree                                     # the switch / create picker, for the terminal's repo
 rex do worktree_remove                              # the remove picker
 rex do worktree_go path=/path/to/repo.feature       # open a worktree's session
+rex do worktree_close path=/path/to/repo.feature main=/path/to/repo   # close a removed worktree's session
 ```
+
+## Closing sessions when removing outside the picker
+
+The remove picker closes the worktree's session, but `wt remove` and `wt merge` run elsewhere don't know about Rex. A worktrunk `post-remove` hook in `~/.config/worktrunk/config.toml` closes the session however the worktree is removed:
+
+```toml
+[post-remove]
+rex-session = "command -v rex >/dev/null 2>&1 && rex --autostart=false do worktree_close path={{ worktree_path }} main={{ primary_worktree_path }} >/dev/null 2>&1 || true"
+```
+
+`--autostart=false` keeps it from starting a Rex server on a machine where Rex isn't running. When you remove with the picker, the picker and the hook both ask to close the session; the second finds nothing left to close.
 
 ## Test
 
-`test/list_test.sh` checks what the pickers list, on a throwaway repository, without Rex:
+`bash test/run.sh` runs every check, as CI does on each push and pull request:
 
-```sh
-bash test/list_test.sh
-```
-
-`test/session_test.lua` checks how sessions are found, reused and closed, against a fake `rex`; it needs only Lua 5.1:
-
-```sh
-lua test/session_test.lua
-```
+- `test/session_test.lua` checks how sessions are created, found, remembered and closed, and `test/picker_test.lua` the floats and `setup`, both against the fake `rex` in `test/fake_rex.lua`. They need only Lua 5.1 or LuaJIT, the Lua Rex runs: `luajit test/session_test.lua`.
+- `test/list_test.sh` checks what the pickers list, on a throwaway repository, without Rex. It needs git, jq and wt, and skips itself without them.
+- `shellcheck` checks the scripts, when it is installed.
 
 ## Upgrade
 
