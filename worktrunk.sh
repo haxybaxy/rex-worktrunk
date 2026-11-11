@@ -14,11 +14,13 @@
 #         --base; alt-enter forces the typed name even when it fuzzy-matches.
 #         worktrunk shortcuts (^ default, - previous, pr:N, mr:N, PR/MR URLs)
 #         pass straight through. The worktree then opens as a Rex session via
-#         `rex do worktree_go`.
+#         `rex do worktree_go`, which remembers this float's session
+#         ($REX_SESSION) as the one the worktree was opened from.
 # remove: fzf over removable worktrees (never the main checkout), then
 #         `wt remove --foreground` with worktrunk's own confirmation and
 #         safety checks, then the worktree's Rex session is closed via
-#         `rex do worktree_close`.
+#         `rex do worktree_close`; if you were in it, the app goes back to the
+#         session the worktree was opened from.
 
 set -uo pipefail
 
@@ -216,6 +218,8 @@ remove() {
         hold "wt remove failed (see above)."; return 0
     fi
 
+    # main is a fallback for when the session the worktree was opened from is
+    # gone. A post-remove hook calling worktree_close too is harmless.
     # shellcheck disable=SC1010
     rex do worktree_close path="$wtpath" main="$mainpath" >/dev/null \
         || hold "Removed $name, but could not close its Rex session."
