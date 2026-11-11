@@ -47,7 +47,9 @@ git -C "$repo" init -q -b main
 git -C "$repo" commit -q --allow-empty -m init
 git -C "$repo" branch stale-branch
 command wt switch --create feat/demo --no-cd --no-hooks -y -C "$repo" >/dev/null 2>&1
-worktree=$(command wt list --format=json -C "$repo" | jq -r '.[] | select(.branch == "feat/demo") | .path')
+# worktrunk prints a bare array with .path, or schema 2's {items: [...]} with .worktree.path.
+worktree=$(command wt list --format=json -C "$repo" |
+    jq -r '(if type == "array" then . else .items end)[] | select(.branch == "feat/demo") | .path // .worktree.path')
 
 failed=0
 
