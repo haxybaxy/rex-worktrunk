@@ -93,6 +93,24 @@ do
     err and err:find("can't tell the working directory", 1, true) and last_layer() == nil, err)
 end
 
+do
+  local M = fresh{ script = "/opt/wt/worktrunk.sh", finder = "sk" }
+  M.open(ctx)
+  local pick = script_args(command_of(last_layer()))
+  M.open_remove(ctx)
+  local remove = script_args(command_of(last_layer()))
+  t.check("passes --finder sk to both pickers",
+    t.same_list(pick, { "pick", "--base", "@", "--finder", "sk" })
+      and t.same_list(remove, { "remove", "--finder", "sk" }), t.show(pick) .. " " .. t.show(remove))
+end
+
+do
+  local M = fresh{ finder = "peco" }
+  t.check("warns about an unknown finder and keeps fzf",
+    #fake:warnings() == 1 and fake:warnings()[1]:find("peco", 1, true) and M.options.finder == "fzf",
+    t.show(fake:warnings()))
+end
+
 --------------------------------------------------------------------------------
 t.section("the remove picker")
 --------------------------------------------------------------------------------

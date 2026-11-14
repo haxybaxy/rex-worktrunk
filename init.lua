@@ -7,7 +7,7 @@
 --   rex.bind("ctrl+space>d", "worktree_remove")
 --
 -- Actions:
---   worktree         Floating fzf picker over the worktrees and branches of the
+--   worktree         Floating fzf/sk picker over the worktrees and branches of the
 --                    repo the focused terminal is in. Enter on a match switches
 --                    to it; a typed name that matches nothing creates a worktree
 --                    for a new branch (alt-enter forces the typed name). Either
@@ -71,6 +71,8 @@ M.options = {
   label = nil,
   -- The picker script. Defaults to worktrunk.sh beside this file.
   script = nil,
+  -- The fuzzy finder the pickers run: "fzf" or "sk" (skim).
+  finder = "fzf",
 }
 
 -- The worktree table given to label and layout:
@@ -88,7 +90,10 @@ local OPTION_TYPES = {
   layout  = { "function" },
   label   = { "function" },
   script  = { "string" },
+  finder  = { "string" },
 }
+
+local FINDERS = { fzf = true, sk = true }
 
 local SHELL_FLAVOR     = "com.superlogical.terminal.shell"
 local TERMINAL_CREATOR = "com.superlogical.terminal"
@@ -413,6 +418,10 @@ local function picker_command(args)
     command = { script }
   end
   for _, arg in ipairs(args) do command[#command + 1] = arg end
+  if M.options.finder ~= "fzf" then
+    command[#command + 1] = "--finder"
+    command[#command + 1] = M.options.finder
+  end
   return command
 end
 
@@ -549,6 +558,8 @@ function M.setup(opts)
     elseif not fits then
       warn("ignoring option " .. name .. ": expected a " .. table.concat(types, " or ")
         .. ", got a " .. type(value))
+    elseif name == "finder" and not FINDERS[value] then
+      warn("ignoring option finder: expected \"fzf\" or \"sk\", got \"" .. value .. "\"")
     else
       M.options[name] = value
     end

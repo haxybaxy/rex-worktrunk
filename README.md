@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/641a09cc-0809-4ec9-9d0b-5335e44e177d
 
 ## Install
 
-Requires `wt` ≥ 0.60, `fzf` and `jq` on your login shell's `PATH`.
+Requires `wt` ≥ 0.60, `fzf` (or [`sk`](https://github.com/skim-rs/skim)) and `jq` on your login shell's `PATH`.
 
 ```sh
 git clone https://github.com/haxybaxy/rex-worktrunk ~/.config/rex/rex-worktrunk
@@ -41,6 +41,7 @@ require("rex-worktrunk").setup{
   label   = nil,                      -- function(path, worktree) -> label for a new session
   layout  = nil,                      -- function(label, path, worktree) -> rex.layout for a new session
   script  = nil,                      -- picker script (default: worktrunk.sh)
+  finder  = "fzf",                    -- fuzzy finder: "fzf" or "sk" (skim)
 }
 ```
 

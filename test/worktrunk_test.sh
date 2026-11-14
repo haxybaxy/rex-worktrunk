@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks worktrunk.sh on a throwaway repository: what the pickers list, and
-# what a pick or a removal hands back to Rex. git, jq and wt are real; fzf and
-# rex are stand-ins that answer with $FZF_ANSWER and write down their arguments.
+# what a pick or a removal hands back to Rex. git, jq and wt are real; fzf, sk
+# and rex are stand-ins: the finders answer with $FINDER_ANSWER and write down
+# their name, rex writes down its arguments.
 #
 #   bash test/worktrunk_test.sh
 
@@ -27,19 +28,22 @@ export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
 mkdir "$tmp/bin"
 cat >"$tmp/bin/fzf" <<'STUB'
 #!/usr/bin/env bash
-# Answers like fzf: prints $FZF_ANSWER and exits $FZF_STATUS.
+# Answers like fzf or sk: prints $FINDER_ANSWER and exits $FINDER_STATUS.
 cat >/dev/null
-[[ -n ${FZF_ANSWER:-} ]] && printf '%s\n' "$FZF_ANSWER"
-exit "${FZF_STATUS:-0}"
+basename "$0" >>"$FINDER_LOG"
+[[ -n ${FINDER_ANSWER:-} ]] && printf '%s\n' "$FINDER_ANSWER"
+exit "${FINDER_STATUS:-0}"
 STUB
+cp "$tmp/bin/fzf" "$tmp/bin/sk"
 cat >"$tmp/bin/rex" <<'STUB'
 #!/usr/bin/env bash
 # Writes its arguments to $REX_LOG, one line per call.
 echo "$*" >>"$REX_LOG"
 STUB
-chmod +x "$tmp/bin/fzf" "$tmp/bin/rex"
+chmod +x "$tmp/bin/fzf" "$tmp/bin/sk" "$tmp/bin/rex"
 export PATH=$tmp/bin:$PATH
 export REX_LOG=$tmp/rex.log
+export FINDER_LOG=$tmp/finder.log
 
 repo=$tmp/repo
 mkdir "$repo"
@@ -77,8 +81,8 @@ same() {
 handed_back() {
     local dir=$1 answer=$2
     shift 2
-    : >"$REX_LOG"
-    (cd "$dir" && FZF_ANSWER=$answer "$script" "$@" >"$tmp/out.log" 2>&1 </dev/null) || true
+    : >"$REX_LOG"; : >"$FINDER_LOG"
+    (cd "$dir" && FINDER_ANSWER=$answer "$script" "$@" >"$tmp/out.log" 2>&1 </dev/null) || true
     cat "$REX_LOG"
 }
 
@@ -116,7 +120,22 @@ same "--slugify turns a typed title into a branch name" \
 same "a worktrunk shortcut passes through, with the branch it stands for" \
     "$(handed_back "$worktree" '^' pick)" \
     "do worktree_go path=$repo from=$worktree branch=main main=$repo"
-same "cancelling hands nothing back" "$(FZF_STATUS=130 handed_back "$repo" '' pick)" ""
+same "cancelling hands nothing back" "$(FINDER_STATUS=130 handed_back "$repo" '' pick)" ""
+same "fzf is the default finder" "$(cat "$FINDER_LOG")" fzf
+same "sk: a match opens its worktree" \
+    "$(handed_back "$repo" $'dem\nfeat/demo' pick --finder sk)" \
+    "do worktree_go path=$worktree from=$repo branch=feat/demo main=$repo"
+same "--finder sk runs sk" "$(cat "$FINDER_LOG")" sk
+# On alt-enter sk prints the query, a marker, then the match if there is one.
+same "sk: alt-enter creates the typed name over a match" \
+    "$(handed_back "$repo" $'fea\n~typed\nfeat/demo' pick --finder sk)" \
+    "do worktree_go path=$repo.fea from=$repo branch=fea main=$repo"
+same "sk: alt-enter without a match creates the typed name" \
+    "$(FINDER_STATUS=1 handed_back "$repo" $'idea\n~typed' pick --finder sk)" \
+    "do worktree_go path=$repo.idea from=$repo branch=idea main=$repo"
+same "an unknown finder is refused" \
+    "$(handed_back "$repo" 'x' pick --finder peco)$(grep -o 'unknown finder: peco' "$tmp/out.log")" \
+    "unknown finder: peco"
 
 echo
 echo "removing"
@@ -124,6 +143,10 @@ same "a removed worktree's session is closed" \
     "$(handed_back "$repo" 'new-idea' remove)" \
     "do worktree_close path=$repo.new-idea main=$repo"
 same "and the worktree is gone" "$([[ -d $repo.new-idea ]] && echo there || echo gone)" gone
+same "--finder sk removes with sk" \
+    "$(handed_back "$repo" 'fea' remove --finder sk)" \
+    "do worktree_close path=$repo.fea main=$repo"
+same "and asks sk" "$(cat "$FINDER_LOG")" sk
 same "cancelling removes nothing" \
     "$(handed_back "$repo" '' remove)$([[ -d $worktree ]] && echo there)" there
 

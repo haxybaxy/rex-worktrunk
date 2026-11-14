@@ -4,11 +4,13 @@
 # (https://github.com/devashish2203/herdr-worktrunk). Started by init.lua in
 # a floating terminal whose working directory is the repo to act on.
 #
-#   worktrunk.sh pick [--base BRANCH] [--remotes] [--slugify]
-#   worktrunk.sh remove
+#   worktrunk.sh pick [--base BRANCH] [--remotes] [--slugify] [--finder fzf|sk]
+#   worktrunk.sh remove [--finder fzf|sk]
 #   worktrunk.sh pick|remove --list      # print the candidates and exit
 #
-# pick:   fzf over this repo's worktrees and local branches (remote-tracking
+# --finder: the fuzzy finder to run, fzf (the default) or skim's sk.
+#
+# pick:   fzf/sk over this repo's worktrees and local branches (remote-tracking
 #         branches too with --remotes). Enter on a match switches to it; a typed
 #         name that matches nothing is created with `wt switch --create` from
 #         --base; alt-enter forces the typed name even when it fuzzy-matches.
@@ -17,7 +19,7 @@
 #         `rex do worktree_go`, which is also told the worktree this float
 #         started in, so the plugin can remember this float's session
 #         ($REX_SESSION) as that worktree's and as where the pick came from.
-# remove: fzf over removable worktrees (never the main checkout), then
+# remove: fzf/sk over removable worktrees (never the main checkout), then
 #         `wt remove --foreground` with worktrunk's own confirmation and
 #         safety checks, then the worktree's Rex session is closed via
 #         `rex do worktree_close`; if you were in it, the app goes back to the
@@ -40,6 +42,15 @@ hold() {
 
 need() {
     command -v "$1" >/dev/null 2>&1 || { hold "$1 not found on PATH"; exit 1; }
+}
+
+finder=fzf
+
+set_finder() {
+    case $1 in
+        fzf|sk) finder=$1 ;;
+        *) red "unknown finder: $1 (expected fzf or sk)" >&2; exit 2 ;;
+    esac
 }
 
 # True in a worktree, and in a bare repository that keeps its worktrees elsewhere.
@@ -112,6 +123,7 @@ pick() {
             --base)    base=$2; shift 2 ;;
             --remotes) remotes=true; shift ;;
             --slugify) slugify=true; shift ;;
+            --finder)  set_finder "$2"; shift 2 ;;
             --list)    list_only=true; shift ;;
             *) red "unknown pick option: $1" >&2; exit 2 ;;
         esac
@@ -132,7 +144,7 @@ pick() {
     }
 
     if $list_only; then candidates; return 0; fi
-    need fzf; need jq; need wt
+    need "$finder"; need jq; need wt
 
     local base_label="default branch"
     if [[ $base == "@" ]]; then
@@ -144,15 +156,24 @@ pick() {
     fi
 
     # --print-query returns a typed-but-unmatched name so it can be created;
-    # alt-enter prints only the query, forcing the typed name over a fuzzy match.
+    # alt-enter forces the typed name over a fuzzy match. fzf then prints only
+    # the query; sk has no print-query action, so it prints a marker after the
+    # query instead. ~ can't be in a branch name, so the marker is never a pick.
+    local force_typed='~typed' force_bind
+    case $finder in
+        fzf) force_bind=alt-enter:print-query ;;
+        sk)  force_bind="alt-enter:accept($force_typed)" ;;
+    esac
     local choice ret name
-    choice=$(candidates | fzf --print-query --reverse --info=inline \
-        --bind=alt-enter:print-query \
+    choice=$(candidates | "$finder" --print-query --reverse --info=inline \
+        --bind="$force_bind" \
         --prompt='worktree ❯ ' \
         --header="↵ on a match → switch · type a new name + ↵ → create from ${base_label} · alt-↵ → force typed name · esc → cancel")
     ret=$?
     [[ $ret -gt 1 ]] && return 0      # 130 = esc/abort (0 = picked, 1 = typed a new name)
     name=${choice##*$'\n'}            # last line: the selection if any, else the query
+    local query=${choice%%$'\n'*}
+    [[ $choice == "$query"$'\n'"$force_typed"* ]] && name=$query
     [[ -z $name ]] && return 0
 
     if $slugify && ! is_shortcut "$name" && ! ref_exists "$name"; then
@@ -209,7 +230,13 @@ pick() {
 # Remove picker
 remove() {
     local list_only=false
-    [[ ${1:-} == --list ]] && list_only=true
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --finder) set_finder "$2"; shift 2 ;;
+            --list)   list_only=true; shift ;;
+            *) red "unknown remove option: $1" >&2; exit 2 ;;
+        esac
+    done
     in_repo || return 1
     need jq; need wt
 
@@ -222,10 +249,10 @@ remove() {
     if [[ -z $cands ]]; then
         yellow "No removable worktrees (only the main worktree exists)."; sleep 2; return 0
     fi
-    need fzf
+    need "$finder"
 
     local name
-    name=$(fzf --reverse --info=inline \
+    name=$("$finder" --reverse --info=inline \
         --prompt='remove worktree ❯ ' \
         --header='↵ to remove · worktrunk refuses unmerged branches and dirty worktrees · esc to cancel' <<<"$cands")
     [[ -z $name ]] && return 0
@@ -251,5 +278,5 @@ remove() {
 case ${1:-} in
     pick)   shift; pick "$@" ;;
     remove) shift; remove "$@" ;;
-    *) red "usage: worktrunk.sh pick [--base BRANCH] [--remotes] [--slugify] | remove" >&2; exit 2 ;;
+    *) red "usage: worktrunk.sh pick [--base BRANCH] [--remotes] [--slugify] [--finder fzf|sk] | remove [--finder fzf|sk]" >&2; exit 2 ;;
 esac
