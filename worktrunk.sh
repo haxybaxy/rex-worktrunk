@@ -7,6 +7,12 @@
 #   worktrunk.sh pick [--base BRANCH] [--remotes] [--slugify]
 #   worktrunk.sh remove
 #   worktrunk.sh pick|remove --list      # print the candidates and exit
+#   worktrunk.sh switch NAME [--base BRANCH] [--slugify]
+#   worktrunk.sh remove NAME
+#
+# switch NAME and remove NAME do what pick and remove do after their fzf
+# step, for a NAME already chosen in Rex's palette (the native picker): the
+# float then only runs worktrunk, where its hooks and prompts can be seen.
 #
 # pick:   fzf over this repo's worktrees and local branches (remote-tracking
 #         branches too with --remotes). Enter on a match switches to it; a typed
@@ -155,6 +161,33 @@ pick() {
     name=${choice##*$'\n'}            # last line: the selection if any, else the query
     [[ -z $name ]] && return 0
 
+    switch_to "$name" "$base" "$slugify"
+}
+
+# Switch / create for a name chosen in Rex's palette: pick without fzf. The
+# name comes first, so worktrunk's "-" shortcut isn't taken for an option.
+switch_named() {
+    [[ -n ${1:-} ]] || { red "usage: worktrunk.sh switch NAME [--base BRANCH] [--slugify]" >&2; exit 2; }
+    local name=$1 base="" slugify=false
+    shift
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --base)    base=$2; shift 2 ;;
+            --slugify) slugify=true; shift ;;
+            *) red "unknown switch option: $1" >&2; exit 2 ;;
+        esac
+    done
+    in_repo || return 1
+    need jq; need wt
+    switch_to "$name" "$base" "$slugify"
+}
+
+# Switch to NAME, creating its branch and worktree when needed, and hand the
+# worktree back to Rex. BASE is where a new branch starts ("" for worktrunk's
+# default); SLUGIFY is true or false.
+switch_to() {
+    local name=$1 base=$2 slugify=$3
+
     if $slugify && ! is_shortcut "$name" && ! ref_exists "$name"; then
         local slug
         if ! slug=$(branch_slug "$name"); then
@@ -206,10 +239,14 @@ pick() {
     fi
 }
 
-# Remove picker
+# Remove picker. With NAME, chosen in Rex's palette, there is no fzf step.
 remove() {
-    local list_only=false
-    [[ ${1:-} == --list ]] && list_only=true
+    local list_only=false name=""
+    case ${1:-} in
+        --list) list_only=true ;;
+        '')     ;;
+        *)      name=$1 ;;
+    esac
     in_repo || return 1
     need jq; need wt
 
@@ -219,16 +256,20 @@ remove() {
     cands=$(jq -r 'select(.kind == "worktree" and .branch != null and .is_main != true) | .branch' <<<"$items")
 
     if $list_only; then printf '%s\n' "$cands"; return 0; fi
-    if [[ -z $cands ]]; then
-        yellow "No removable worktrees (only the main worktree exists)."; sleep 2; return 0
+    if [[ -n $name ]]; then
+        if ! grep -qxF -- "$name" <<<"$cands"; then
+            hold "not a worktree that can be removed: $name"; return 1
+        fi
+    else
+        if [[ -z $cands ]]; then
+            yellow "No removable worktrees (only the main worktree exists)."; sleep 2; return 0
+        fi
+        need fzf
+        name=$(fzf --reverse --info=inline \
+            --prompt='remove worktree ❯ ' \
+            --header='↵ to remove · worktrunk refuses unmerged branches and dirty worktrees · esc to cancel' <<<"$cands")
+        [[ -z $name ]] && return 0
     fi
-    need fzf
-
-    local name
-    name=$(fzf --reverse --info=inline \
-        --prompt='remove worktree ❯ ' \
-        --header='↵ to remove · worktrunk refuses unmerged branches and dirty worktrees · esc to cancel' <<<"$cands")
-    [[ -z $name ]] && return 0
 
     local wtpath mainpath
     wtpath=$(jq -r --arg b "$name" 'select(.kind == "worktree" and .branch == $b) | .path' <<<"$items" | head -n1)
@@ -250,6 +291,7 @@ remove() {
 
 case ${1:-} in
     pick)   shift; pick "$@" ;;
+    switch) shift; switch_named "$@" ;;
     remove) shift; remove "$@" ;;
-    *) red "usage: worktrunk.sh pick [--base BRANCH] [--remotes] [--slugify] | remove" >&2; exit 2 ;;
+    *) red "usage: worktrunk.sh pick [--base BRANCH] [--remotes] [--slugify] | switch NAME [--base BRANCH] [--slugify] | remove [NAME]" >&2; exit 2 ;;
 esac

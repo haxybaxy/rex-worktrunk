@@ -38,6 +38,7 @@ require("rex-worktrunk").setup{
   remotes = false,                    -- also list remote-tracking branches
   slugify = false,                    -- "Fix Login Bug" becomes fix-login-bug
   bounds  = { 0.15, 0.1, 0.7, 0.8 },  -- float x, y, width, height as fractions of the window
+  picker  = "float",                  -- "native" lists in Rex's command palette instead (see below)
   label   = nil,                      -- function(path, worktree) -> label for a new session
   layout  = nil,                      -- function(label, path, worktree) -> rex.layout for a new session
   script  = nil,                      -- picker script (default: worktrunk.sh)
@@ -66,6 +67,14 @@ require("rex-worktrunk").setup{
 ```
 
 </details>
+
+## Native picker
+
+`picker = "native"` lists worktrees and branches in Rex's command palette instead of fzf. It needs a Rex whose server and app can show palette prompts (`rex.ui`, server API revision 17 or later).
+
+- Picking an existing worktree switches in place: no float, and no Remote Control needed.
+- Creating a worktree (a new name, a branch without one, `pr:N`) and removing one still run in the float, so worktrunk's hooks and prompts stay visible.
+- The fzf float is used when Rex can't ask in the palette, and for sessions on remote hosts.
 
 ## CLI
 

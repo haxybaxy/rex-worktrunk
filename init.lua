@@ -7,14 +7,15 @@
 --   rex.bind("ctrl+space>d", "worktree_remove")
 --
 -- Actions:
---   worktree         Floating fzf picker over the worktrees and branches of the
---                    repo the focused terminal is in. Enter on a match switches
---                    to it; a typed name that matches nothing creates a worktree
---                    for a new branch (alt-enter forces the typed name). Either
---                    way the worktree opens as a Rex session.
---   worktree_remove  Floating picker over removable worktrees, never the main
---                    checkout. worktrunk runs the removal with its own checks,
---                    then the worktree's Rex session is closed.
+--   worktree         Picker over the worktrees and branches of the repo the
+--                    focused terminal is in: fzf in a float, or Rex's command
+--                    palette with picker = "native". A match switches to it; a
+--                    typed name that matches nothing creates a worktree for a
+--                    new branch (in fzf, alt-enter forces the typed name).
+--                    Either way the worktree opens as a Rex session.
+--   worktree_remove  Picker over removable worktrees, never the main checkout.
+--                    worktrunk runs the removal with its own checks, then the
+--                    worktree's Rex session is closed.
 --   worktree_go      Open the session for a worktree directory:
 --                      rex do worktree_go path=/path/to/repo.feature
 --                    The pickers also pass from, branch and main (see M.go).
@@ -35,13 +36,19 @@
 --       opening a second session. An adopted session is never closed.
 --
 -- How the pickers hand back:
---   The floats run worktrunk.sh, which hands results back with `rex do`; the
---   app accepts a session switch from the CLI only with Remote Control on
---   (Rex → Settings → Rex Server). An action can't wait for the pick itself:
---   the app stops taking input while a key-bound action runs.
+--   picker = "float", the default: the float runs worktrunk.sh, which picks
+--   with fzf, runs worktrunk and hands the result back with `rex do`. The app
+--   accepts a session switch from the CLI only with Remote Control on (Rex →
+--   Settings → Rex Server).
+--   picker = "native": the action asks in Rex's command palette with
+--   rex.ui.pick, which pauses it until the person answers. A pick of an
+--   existing worktree is finished in the action, so it needs no Remote
+--   Control. Creating or removing a worktree goes on in the float without fzf,
+--   where worktrunk's hooks and prompts can be seen (see The native picker).
 --
--- Sections: options · paths and strings · Rex queries · session registry ·
--- worktree sessions · the app · the picker float · actions and setup.
+-- Sections: options · paths and strings · Rex queries · commands in the repo ·
+-- session registry · worktree sessions · the app · the picker float · the
+-- native picker · actions and setup.
 
 local M = {}
 
@@ -61,6 +68,10 @@ M.options = {
   slugify = false,
   -- Where the pickers float: x, y, width, height as fractions of the window.
   bounds = { 0.15, 0.1, 0.7, 0.8 },
+  -- How the pickers ask: "float" runs fzf in a floating terminal; "native"
+  -- lists in Rex's command palette, and uses the float when Rex can't ask
+  -- there. See The native picker below.
+  picker = "float",
   -- function(label, path, worktree) returning the layout for a new session,
   -- built with rex.layout. The default is one shell started in the worktree.
   layout = nil,
@@ -85,10 +96,14 @@ local OPTION_TYPES = {
   remotes = { "boolean" },
   slugify = { "boolean" },
   bounds  = { "table" },
+  picker  = { "string" },
   layout  = { "function" },
   label   = { "function" },
   script  = { "string" },
 }
+
+-- The values the picker option takes.
+local PICKERS = { float = true, native = true }
 
 local SHELL_FLAVOR     = "com.superlogical.terminal.shell"
 local TERMINAL_CREATOR = "com.superlogical.terminal"
@@ -175,6 +190,95 @@ local function live_session_ids()
   local ids = {}
   for _, s in ipairs(list.sessions or {}) do ids[s.session_id] = true end
   return ids
+end
+
+--------------------------------------------------------------------------------
+-- Commands in the repo
+--
+-- The native picker runs git and wt itself. Rex's server has a short PATH,
+-- usually without Homebrew's, so each command runs through the login shell,
+-- which sets PATH up the way the person's terminals have it.
+--------------------------------------------------------------------------------
+
+-- argv as run by the login shell. The arguments are passed to the shell, not
+-- written into its script, so nothing in them is read as shell syntax.
+local function login_command(argv)
+  local shell = os.getenv("SHELL")
+  if not shell or shell == "" then shell = "/bin/sh" end
+  local command
+  if basename(shell) == "fish" then
+    command = { shell, "-l", "-c", "exec $argv" }   -- fish: every argument is in $argv
+  else
+    command = { shell, "-lc", 'exec "$@"', "rex-worktrunk" }   -- the first is $0
+  end
+  for _, arg in ipairs(argv) do command[#command + 1] = arg end
+  return command
+end
+
+-- Run argv in dir and return rex.exec's result. Raises when it couldn't start.
+local function run(dir, argv, timeout)
+  local result, err = rex.exec(login_command(argv), { cwd = dir, timeout = timeout or 10 })
+  if result == nil then raise("can't run " .. argv[1] .. ": " .. tostring(err)) end
+  return result
+end
+
+-- The first line of a command's error output, to put in a message.
+local function first_line(s)
+  local line = trim(s or ""):match("^[^\n]*")
+  return line ~= "" and line or "no output"
+end
+
+-- The top of the checkout dir is in, the worktree a pick is made from; nil
+-- in a bare repository. Raises when dir is in no repository at all.
+local function checkout_top(dir)
+  local top = run(dir, { "git", "rev-parse", "--show-toplevel" })
+  if top.ok and trim(top.stdout) ~= "" then return trim(top.stdout) end
+  if not run(dir, { "git", "rev-parse", "--git-dir" }).ok then
+    raise("not a git repository: " .. dir)
+  end
+  return nil
+end
+
+-- What `wt list` reports, one table per row:
+--   { kind = "worktree" or "branch", branch = name or nil, path = dir or nil,
+--     is_main = true or false }
+-- whichever of worktrunk's JSON schemas it printed: a bare array of rows with
+-- path and is_main, or { items = rows } with worktree.path and worktree.main.
+local function wt_rows(dir)
+  local result = run(dir, { "wt", "list", "--format=json" }, 20)
+  if not result.ok then raise("wt list failed: " .. first_line(result.stderr)) end
+  local data, err = rex.json.decode(result.stdout)
+  if type(data) ~= "table" then raise("can't read wt list's output: " .. tostring(err)) end
+  local list = data.items or data
+  if type(list) ~= "table" then raise("unsupported wt list output") end
+  local rows = {}
+  for _, item in ipairs(list) do
+    local tree = type(item.worktree) == "table" and item.worktree or nil
+    rows[#rows + 1] = {
+      kind    = item.kind or (tree and "worktree" or "branch"),
+      branch  = item.branch,
+      path    = item.path or (tree and tree.path),
+      is_main = (item.is_main or (tree and tree.main)) == true,
+    }
+  end
+  return rows
+end
+
+-- The repo's branches as { name, remote }: local ones, and remote-tracking
+-- ones too with the remotes option. origin/HEAD is left out.
+local function git_branches(dir)
+  local argv = { "git", "for-each-ref", "--format=%(refname) %(refname:short)", "refs/heads" }
+  if M.options.remotes then argv[#argv + 1] = "refs/remotes" end
+  local result = run(dir, argv)
+  if not result.ok then raise("git for-each-ref failed: " .. first_line(result.stderr)) end
+  local branches = {}
+  for line in result.stdout:gmatch("[^\n]+") do
+    local ref, short = line:match("^(%S+) (.+)$")
+    if ref and not ref:match("/HEAD$") then
+      branches[#branches + 1] = { name = short, remote = ref:find("^refs/remotes/") ~= nil }
+    end
+  end
+  return branches
 end
 
 --------------------------------------------------------------------------------
@@ -416,11 +520,17 @@ local function picker_command(args)
   return command
 end
 
--- Open a floating terminal running command in the focused terminal's working
--- directory, which is how the repo is chosen.
-local function open_picker(ctx, command, label)
+-- The focused terminal's working directory, which is how the repo is chosen.
+local function picker_cwd(ctx)
   local cwd = focused_terminal_cwd(ctx.block_id)
   if cwd == nil then raise("can't tell the working directory of the focused terminal") end
+  return cwd
+end
+
+-- Open a floating terminal running command in cwd, by default the focused
+-- terminal's working directory.
+local function open_picker(ctx, command, label, cwd)
+  cwd = cwd or picker_cwd(ctx)
   close_picker()
   local layer, err = rex.session.new_layer{
     bounds = M.options.bounds,
@@ -436,6 +546,178 @@ local function open_picker(ctx, command, label)
   if err ~= nil then raise(tostring(err)) end
   picker.layer_id = layer.layer_id
   return layer
+end
+
+-- The script's --base and --slugify arguments, and --remotes when asked for.
+local function script_flags(with_remotes)
+  local args = {}
+  if type(M.options.base) == "string" and M.options.base ~= "" then
+    args[#args + 1] = "--base"
+    args[#args + 1] = M.options.base
+  end
+  if with_remotes and M.options.remotes then args[#args + 1] = "--remotes" end
+  if M.options.slugify then args[#args + 1] = "--slugify" end
+  return args
+end
+
+-- Open a float running the script with args. Returns the layer's ID.
+local function open_float(ctx, args, label, cwd)
+  local layer = open_picker(ctx, picker_command(args), label, cwd)
+  return { layer_id = layer.layer_id }
+end
+
+-- The fzf pickers.
+local function float_pick(ctx)
+  local args = { "pick" }
+  for _, flag in ipairs(script_flags(true)) do args[#args + 1] = flag end
+  return open_float(ctx, args, "worktree")
+end
+
+local function float_remove(ctx)
+  return open_float(ctx, { "remove" }, "worktree remove")
+end
+
+--------------------------------------------------------------------------------
+-- The native picker
+--
+-- With picker = "native", the pickers list in Rex's command palette with
+-- rex.ui.pick. Only switching to an existing worktree is finished in the
+-- action: `wt switch` runs here, then its session opens. The rest goes on in
+-- the float, with the name already chosen and no fzf:
+--   * creating a worktree, because worktrunk's hooks may take longer than an
+--     action may run (30 seconds) and may ask for approval;
+--   * removing one, because worktrunk may refuse it or ask first;
+--   * a pick of an existing worktree whose `wt switch` fails here, so its
+--     error can be read.
+-- The fzf float is used instead when Rex can't ask in the palette: no Rex app
+-- that can show prompts, or a session on another host, where git and wt
+-- would run on the wrong machine.
+--------------------------------------------------------------------------------
+
+-- Rex lists at most this many items.
+local MAX_ITEMS = 2000
+
+-- Whether this pick happens in the palette.
+local function use_native(ctx)
+  if M.options.picker ~= "native" or ctx.server ~= nil then return false end
+  if rex.ui == nil or rex.ui.pick == nil then
+    warn("this Rex can't ask in the command palette; using the float")
+    return false
+  end
+  return true
+end
+
+-- Ask in the palette. Returns the answer; nil when the person didn't answer;
+-- or nil, true when Rex couldn't ask, and the float should. Never call it
+-- inside pcall: Rex can only pause an action outside one.
+local function ask(prompt)
+  local answer, why, detail = rex.ui.pick(prompt)
+  if answer ~= nil then return answer end
+  if why == "cancelled" or why == "timeout" then return nil end
+  if why == "unsupported" or why == "no_client" then
+    warn("Rex couldn't ask in the command palette (" .. tostring(why) .. "); using the float")
+    return nil, true
+  end
+  if why == "busy" then raise("Rex is already asking something") end
+  raise("Rex couldn't ask: " .. tostring(detail or why))
+end
+
+-- A path with the home directory as ~, for showing.
+local function tilde(path)
+  local home = os.getenv("HOME") or ""
+  if home ~= "" and (path == home or path:sub(1, #home + 1) == home .. "/") then
+    return "~" .. path:sub(#home + 1)
+  end
+  return path
+end
+
+local function main_checkout(rows)
+  for _, row in ipairs(rows) do
+    if row.kind == "worktree" and row.is_main then return row.path end
+  end
+  return nil
+end
+
+-- The switch picker's items: worktrees, then branches without one. Also
+-- returns the worktree rows by branch.
+local function switch_items(rows, branches)
+  local items, seen, worktrees = {}, {}, {}
+  local function add(item)
+    if #items < MAX_ITEMS and not seen[item.id] then
+      seen[item.id] = true
+      items[#items + 1] = item
+    end
+  end
+  for _, row in ipairs(rows) do
+    if row.kind == "worktree" and row.branch and row.path then
+      worktrees[row.branch] = row
+      add{ id = row.branch, subtitle = tilde(row.path), icon = "folder",
+           detail = row.is_main and "main" or "worktree" }
+    end
+  end
+  for _, branch in ipairs(branches) do
+    add{ id = branch.name, icon = "branch", detail = branch.remote and "remote" or "branch" }
+  end
+  for _, row in ipairs(rows) do
+    if row.kind ~= "worktree" and row.branch then
+      add{ id = row.branch, icon = "branch", detail = "branch" }
+    end
+  end
+  return items, worktrees
+end
+
+-- The switch / create picker in the palette.
+local function native_pick(ctx)
+  local cwd = picker_cwd(ctx)
+  local from = checkout_top(cwd)
+  local rows = wt_rows(cwd)
+  local items, worktrees = switch_items(rows, git_branches(cwd))
+
+  local answer, fallback = ask{
+    title       = "Worktree",
+    placeholder = "Pick a worktree or branch, or type a new branch name",
+    allow_other = true,
+    items       = items,
+  }
+  if fallback then return float_pick(ctx) end
+  if answer == nil then return { cancelled = true } end
+  -- allow_other: what was typed, rather than an item.
+  local name = type(answer) == "table" and trim(answer.text or "") or answer
+  if name == "" then return { cancelled = true } end
+
+  local worktree = worktrees[name]
+  if worktree then
+    local result = run(cwd, { "wt", "switch", name, "--no-cd", "--format=json" }, 20)
+    if result.ok then
+      return M.go(ctx, worktree.path, { from = from, branch = name, main = main_checkout(rows) })
+    end
+    warn("wt switch " .. name .. " failed (" .. first_line(result.stderr) .. "); running it in the float")
+  end
+  local args = { "switch", name }
+  for _, flag in ipairs(script_flags(false)) do args[#args + 1] = flag end
+  return open_float(ctx, args, "worktree", cwd)
+end
+
+-- The remove picker in the palette.
+local function native_remove(ctx)
+  local cwd = picker_cwd(ctx)
+  checkout_top(cwd)   -- raises outside a repository
+  local items = {}
+  for _, row in ipairs(wt_rows(cwd)) do
+    if row.kind == "worktree" and row.branch and not row.is_main and #items < MAX_ITEMS then
+      items[#items + 1] = { id = row.branch, subtitle = row.path and tilde(row.path), icon = "folder" }
+    end
+  end
+
+  local answer, fallback = ask{
+    title       = "Remove worktree",
+    placeholder = #items > 0 and "worktrunk refuses unmerged branches and dirty worktrees"
+                  or "Nothing to remove: there is only the main checkout",
+    items       = items,
+  }
+  if fallback then return float_remove(ctx) end
+  if answer == nil then return { cancelled = true } end
+  return open_float(ctx, { "remove", answer }, "worktree remove", cwd)
 end
 
 --------------------------------------------------------------------------------
@@ -520,23 +802,18 @@ function M.close(ctx, path, main)
   return { closed = not entry.adopted, session_id = entry.session, moved_to = moved_to }
 end
 
--- Open the switch / create picker.
+-- Open the switch / create picker. Returns the float's layer_id when one
+-- opened; with the native picker, M.go's result, or cancelled = true.
 function M.open(ctx)
-  local args = { "pick" }
-  if type(M.options.base) == "string" and M.options.base ~= "" then
-    args[#args + 1] = "--base"
-    args[#args + 1] = M.options.base
-  end
-  if M.options.remotes then args[#args + 1] = "--remotes" end
-  if M.options.slugify then args[#args + 1] = "--slugify" end
-  local layer = open_picker(ctx, picker_command(args), "worktree")
-  return { layer_id = layer.layer_id }
+  if use_native(ctx) then return native_pick(ctx) end
+  return float_pick(ctx)
 end
 
--- Open the remove picker.
+-- Open the remove picker. Returns the float's layer_id when one opened, or
+-- cancelled = true.
 function M.open_remove(ctx)
-  local layer = open_picker(ctx, picker_command{ "remove" }, "worktree remove")
-  return { layer_id = layer.layer_id }
+  if use_native(ctx) then return native_remove(ctx) end
+  return float_remove(ctx)
 end
 
 function M.setup(opts)
@@ -549,6 +826,8 @@ function M.setup(opts)
     elseif not fits then
       warn("ignoring option " .. name .. ": expected a " .. table.concat(types, " or ")
         .. ", got a " .. type(value))
+    elseif name == "picker" and not PICKERS[value] then
+      warn('ignoring option picker: expected "float" or "native", got "' .. value .. '"')
     else
       M.options[name] = value
     end
