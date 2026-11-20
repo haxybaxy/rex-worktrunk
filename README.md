@@ -2,7 +2,11 @@
 
 Git worktree pickers for [Rex](https://www.superlogical.com/rex), powered by [worktrunk](https://github.com/max-sixty/worktrunk). One key switches to or creates a worktree, another removes one. Each worktree gets its own Rex session.
 
-https://github.com/user-attachments/assets/641a09cc-0809-4ec9-9d0b-5335e44e177d
+
+
+https://github.com/user-attachments/assets/3f925aba-0438-4f44-abb9-08d052d9a0a2
+
+
 
 ## Features
 
@@ -38,7 +42,7 @@ require("rex-worktrunk").setup{
   remotes = false,                    -- also list remote-tracking branches
   slugify = false,                    -- "Fix Login Bug" becomes fix-login-bug
   bounds  = { 0.15, 0.1, 0.7, 0.8 },  -- float x, y, width, height as fractions of the window
-  picker  = "float",                  -- "native" lists in Rex's command palette instead (see below)
+  picker  = "float",                  -- "native" lists in Rex's command palette instead (see below), make sure your server has API v17 or later
   label   = nil,                      -- function(path, worktree) -> label for a new session
   layout  = nil,                      -- function(label, path, worktree) -> rex.layout for a new session
   script  = nil,                      -- picker script (default: worktrunk.sh)
@@ -69,6 +73,8 @@ require("rex-worktrunk").setup{
 </details>
 
 ## Native picker
+> [!NOTE] 
+> This option will become the default once more people update.
 
 `picker = "native"` lists worktrees and branches in Rex's command palette instead of fzf. It needs a Rex whose server and app can show palette prompts (`rex.ui`, server API revision 17 or later).
 
