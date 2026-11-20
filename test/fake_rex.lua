@@ -6,6 +6,10 @@
 --   fake:reset()
 --   local id = fake:add_session("app")
 --
+-- For the native picker: rex.ui.pick answers with what fake:answer queued,
+-- commands run through the login shell are recorded as "cmd" and answered by
+-- fake.run(argv, opts), and rex.json.decode reads the text fake:json made.
+--
 -- The plugin's registry file is real; it lives in a temporary XDG_STATE_HOME
 -- that fake.env points os.getenv at, along with any other variable a test sets.
 
@@ -52,8 +56,43 @@ function Fake:reset()
   self.actions = {}      -- [name] = the table given to rex.action
   self.queue_fails = nil -- message rex.client.queue raises, as with no client
   self.intercept = {}    -- [method] = function(args) -> handled, result, err
+  self.answers = {}      -- what rex.ui.pick answers, in order: { value, why, detail }
+  self.run = nil         -- function(argv, opts) -> rex.exec's result, for login-shell commands
+  self.json_values = {}  -- [text] = the value rex.json.decode returns for it
   self.next_id = 0
+  rex.ui = self.ui       -- a test may set it to nil, as in a Rex without prompts
   os.execute("rm -rf " .. shell_quote(self.env.XDG_STATE_HOME))
+end
+
+-- Queue rex.ui.pick's next answer: an item's id, { text = ... }, or nil with
+-- a reason such as "cancelled". Unqueued questions are cancelled.
+function Fake:answer(value, why, detail)
+  self.answers[#self.answers + 1] = { value = value, why = why, detail = detail }
+end
+
+-- Text that rex.json.decode turns into value.
+function Fake:json(value)
+  local text = "json:" .. self:new_id("value")
+  self.json_values[text] = value
+  return text
+end
+
+-- The argv of each login-shell command, in order.
+function Fake:commands()
+  local found = {}
+  for _, call in ipairs(self.calls) do
+    if call.name == "cmd" then found[#found + 1] = call.args end
+  end
+  return found
+end
+
+-- The argv a login-shell command runs, or nil if argv isn't one: the
+-- plugin's `$SHELL -lc 'exec "$@"' $0 ...` or fish's `fish -l -c 'exec $argv' ...`.
+local function login_inner(argv)
+  if argv[3] ~= 'exec "$@"' and argv[4] ~= "exec $argv" then return nil end
+  local inner = {}
+  for i = 5, #argv do inner[#inner + 1] = argv[i] end
+  return inner
 end
 
 function Fake:cleanup()
@@ -209,12 +248,35 @@ end
 -- The rex table init.lua sees.
 function Fake:api()
   local fake = self
+  fake.ui = {
+    pick = function(prompt)
+      fake:record("ui.pick", prompt)
+      local answer = table.remove(fake.answers, 1) or { why = "cancelled" }
+      return answer.value, answer.why, answer.detail
+    end,
+  }
   return {
     log = function(level, message)
       fake.logs[#fake.logs + 1] = { level = level, message = message }
     end,
 
-    exec = function(argv, _)
+    ui = fake.ui,
+
+    json = {
+      decode = function(text)
+        local value = fake.json_values[text]
+        if value == nil then return nil, "not JSON the fake made: " .. tostring(text) end
+        return value
+      end,
+    },
+
+    exec = function(argv, opts)
+      local inner = login_inner(argv)
+      if inner then
+        fake:record("cmd", { argv = inner, cwd = opts and opts.cwd, shell = argv })
+        if fake.run then return fake.run(inner, opts or {}) end
+        return { ok = true, code = 0, stdout = "", stderr = "" }
+      end
       fake:record("exec", argv)
       if argv[1] == "test" and argv[2] == "-d" then return { ok = fake.dirs[argv[3]] == true } end
       if argv[1] == "mkdir" then os.execute("mkdir -p " .. shell_quote(argv[3])) end

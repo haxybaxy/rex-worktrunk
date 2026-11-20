@@ -56,6 +56,8 @@ do
       and layer.layout.block.label == "worktree")
   t.check("floats where the bounds option says",
     t.same_list(layer.bounds, { 0.15, 0.1, 0.7, 0.8 }), t.show(layer.bounds))
+  t.check("uses the float by default, without asking in the palette",
+    M.options.picker == "float" and #fake:calls_to("ui.pick") == 0)
 end
 
 do

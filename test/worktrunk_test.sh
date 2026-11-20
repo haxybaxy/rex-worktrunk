@@ -119,6 +119,25 @@ same "a worktrunk shortcut passes through, with the branch it stands for" \
 same "cancelling hands nothing back" "$(FZF_STATUS=130 handed_back "$repo" '' pick)" ""
 
 echo
+echo "switching to a name chosen in Rex's palette"
+# fzf would answer with a branch that isn't asked for, so using it shows.
+same "an existing worktree opens without fzf" \
+    "$(handed_back "$repo" stale-branch switch feat/demo)" \
+    "do worktree_go path=$worktree from=$repo branch=feat/demo main=$repo"
+same "a new name creates a branch and its worktree" \
+    "$(handed_back "$worktree" stale-branch switch palette-idea --base main)" \
+    "do worktree_go path=$repo.palette-idea from=$worktree branch=palette-idea main=$repo"
+same "it starts from --base" \
+    "$(git -C "$repo" rev-parse palette-idea)" "$(git -C "$repo" rev-parse main)"
+same "--slugify turns a typed title into a branch name" \
+    "$(handed_back "$repo" stale-branch switch 'Palette Title' --slugify)" \
+    "do worktree_go path=$repo.palette-title from=$repo branch=palette-title main=$repo"
+same "a worktrunk shortcut passes through, with the branch it stands for" \
+    "$(handed_back "$worktree" stale-branch switch '^')" \
+    "do worktree_go path=$repo from=$worktree branch=main main=$repo"
+same "no name hands nothing back" "$(handed_back "$repo" stale-branch switch)" ""
+
+echo
 echo "removing"
 same "a removed worktree's session is closed" \
     "$(handed_back "$repo" 'new-idea' remove)" \
@@ -126,5 +145,12 @@ same "a removed worktree's session is closed" \
 same "and the worktree is gone" "$([[ -d $repo.new-idea ]] && echo there || echo gone)" gone
 same "cancelling removes nothing" \
     "$(handed_back "$repo" '' remove)$([[ -d $worktree ]] && echo there)" there
+# fzf would answer feat/demo, so a removal that used it would show.
+same "a removal by name skips fzf" \
+    "$(handed_back "$repo" feat/demo remove palette-idea)$([[ -d $worktree ]] && echo ' there')" \
+    "do worktree_close path=$repo.palette-idea main=$repo there"
+same "a name that isn't a removable worktree removes nothing" \
+    "$(handed_back "$repo" feat/demo remove main)$(handed_back "$repo" feat/demo remove nope)$([[ -d $worktree ]] && echo there)" \
+    there
 
 exit $failed
