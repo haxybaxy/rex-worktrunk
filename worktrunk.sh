@@ -19,15 +19,16 @@
 #         name that matches nothing is created with `wt switch --create` from
 #         --base; alt-enter forces the typed name even when it fuzzy-matches.
 #         worktrunk shortcuts (^ default, - previous, pr:N, mr:N, PR/MR URLs)
-#         pass straight through. The worktree then opens as a Rex session via
-#         `rex do worktree_go`, which is also told the worktree this float
-#         started in, so the plugin can remember this float's session
-#         ($REX_SESSION) as that worktree's and as where the pick came from.
+#         pass straight through. The worktree then opens as a Rex session, or
+#         with the plugin's group = "tab" as a tab, via `rex do worktree_go`,
+#         which is also told the worktree this float started in, so the plugin
+#         can remember this float's session ($REX_SESSION) or tab as that
+#         worktree's and as where the pick came from.
 # remove: fzf over removable worktrees (never the main checkout), then
 #         `wt remove --foreground` with worktrunk's own confirmation and
-#         safety checks, then the worktree's Rex session is closed via
-#         `rex do worktree_close`; if you were in it, the app goes back to the
-#         session the worktree was opened from.
+#         safety checks, then the worktree's Rex session or tab is closed via
+#         `rex do worktree_close`; if you were in it, the app goes back to
+#         where the worktree was opened from.
 
 set -uo pipefail
 
@@ -235,7 +236,7 @@ switch_to() {
 
     # shellcheck disable=SC1010
     if ! rex do worktree_go "${goargs[@]}" >/dev/null; then
-        hold "Could not open a session for $wtpath."; return 1
+        hold "Could not open $wtpath in Rex."; return 1
     fi
 }
 
@@ -282,11 +283,11 @@ remove() {
         hold "wt remove failed (see above)."; return 0
     fi
 
-    # main is a fallback for when the session the worktree was opened from is
+    # main is a fallback for when the place the worktree was opened from is
     # gone. A post-remove hook calling worktree_close too is harmless.
     # shellcheck disable=SC1010
     rex do worktree_close path="$wtpath" main="$mainpath" >/dev/null \
-        || hold "Removed $name, but could not close its Rex session."
+        || hold "Removed $name, but could not close its Rex session or tab."
 }
 
 case ${1:-} in

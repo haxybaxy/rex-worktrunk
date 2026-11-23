@@ -48,7 +48,9 @@ end
 -- Forget every session, app, call and file from the previous test.
 function Fake:reset()
   self.dirs = {}         -- [path] = true for each directory that exists
-  self.sessions = {}     -- { session_id, label } in creation order
+  self.sessions = {}     -- { session_id, label, windows, active } in creation order;
+                         -- windows holds { window_id, label, layout, block_id } per tab
+  self.attached = {}     -- [session_id] = true once the plugin attached to it
   self.apps = {}         -- { client_id, attached = { [session_id] = true }, refuses = message }
   self.cwd = nil         -- the focused terminal's working directory; nil if unknown
   self.calls = {}        -- every call, in order: { name = ..., args = ... }
@@ -104,11 +106,60 @@ function Fake:new_id(kind)
   return kind .. ":" .. self.next_id
 end
 
--- Add a session as if someone made it outside the plugin. Returns its ID.
+-- Add a session as if someone made it outside the plugin, with one tab.
+-- Returns its ID.
 function Fake:add_session(label)
   local id = self:new_id("session")
-  self.sessions[#self.sessions + 1] = { session_id = id, label = label }
+  self.sessions[#self.sessions + 1] = { session_id = id, label = label, windows = {} }
+  self:add_window(id)
   return id
+end
+
+-- Add a tab holding one block to a session, and make it the tab the session
+-- shows. Returns its window ID and its block's ID.
+function Fake:add_window(session_id, label, layout)
+  local session = self:session(session_id)
+  local window = { window_id = self:new_id("window"), label = label, layout = layout,
+                   block_id = self:new_id("block") }
+  session.windows[#session.windows + 1] = window
+  session.active = window.window_id
+  return window.window_id, window.block_id
+end
+
+-- A session's tab and its place among the session's tabs, or nil.
+function Fake:window(session_id, window_id)
+  local session = self:session(session_id)
+  for i, window in ipairs(session and session.windows or {}) do
+    if window.window_id == window_id then return window, i end
+  end
+  return nil
+end
+
+-- Close a tab as if someone did it by hand.
+function Fake:remove_window(session_id, window_id)
+  local session = self:session(session_id)
+  local _, i = self:window(session_id, window_id)
+  if not i then return false end
+  table.remove(session.windows, i)
+  if session.active == window_id then
+    local next = session.windows[i] or session.windows[i - 1]
+    session.active = next and next.window_id or nil
+  end
+  return true
+end
+
+-- The labels of a session's tabs, in order.
+function Fake:window_labels(session_id)
+  local labels = {}
+  for _, window in ipairs(self:session(session_id).windows) do labels[#labels + 1] = window.label or "" end
+  return labels
+end
+
+-- A session's tabs, in order.
+function Fake:window_ids(session_id)
+  local ids = {}
+  for _, window in ipairs(self:session(session_id).windows) do ids[#ids + 1] = window.window_id end
+  return ids
 end
 
 function Fake:session(id)
@@ -172,6 +223,18 @@ function Fake:selected()
   return ids
 end
 
+-- The places the app was asked to show, in order: "session" or "session/tab".
+function Fake:shown()
+  local places = {}
+  for _, call in ipairs(self.calls) do
+    if (call.name == "client.queue" or call.name == "client.perform") and call.args.action == "session.select" then
+      local args = call.args.args
+      places[#places + 1] = args.session_id .. (args.window_id and ("/" .. args.window_id) or "")
+    end
+  end
+  return places
+end
+
 function Fake:warnings()
   local found = {}
   for _, log in ipairs(self.logs) do
@@ -207,22 +270,80 @@ function methods.session_list(fake)
   return { sessions = list }
 end
 
-function methods.session_create(fake, args)
-  -- As the server does: a label has at most 128 characters.
-  if #(args.label or "") > 128 then return nil, "label is too long" end
-  local id = fake:add_session(args.label)
-  return { session_id = id }
+-- As the server does: a label has at most 128 characters.
+local function label_refused(label)
+  if #(label or "") > 128 then return "label is too long" end
+  return nil
 end
 
+function methods.session_create(fake, args)
+  local refused = label_refused(args.label)
+  for _, window in ipairs(args.initial_windows or {}) do
+    refused = refused or label_refused(window.window_label)
+  end
+  if refused then return nil, refused end
+  local id = fake:new_id("session")
+  fake.sessions[#fake.sessions + 1] = { session_id = id, label = args.label, windows = {} }
+  local created = {}
+  for _, window in ipairs(args.initial_windows or {}) do
+    local window_id, block_id = fake:add_window(id, window.window_label, window.layout)
+    created[#created + 1] = { window_id = window_id, block_ids = { block_id }, revision = #created + 1 }
+  end
+  return { session_id = id, initial_windows = created }
+end
+
+-- Attaching answers with the session's view, as session.view does.
 function methods.session_attach(fake, args)
-  if not fake:session(args.session_id) then return nil, "session_not_found" end
-  return {}
+  local session = fake:session(args.session_id)
+  if not session then return nil, "session_not_found" end
+  fake.attached[args.session_id] = true
+  local windows = {}
+  for _, window in ipairs(session.windows) do
+    windows[#windows + 1] = {
+      window_id        = window.window_id,
+      label            = window.label or "Window",
+      focused_block_id = window.block_id,
+      layers           = { { kind = "tiled", blocks = { { block_id = window.block_id } } } },
+    }
+  end
+  return {
+    client_id = "client:self",
+    view = { session_id = session.session_id, label = session.label,
+             active_window_id = session.active, windows = windows },
+  }
+end
+
+-- As the server does: a method that takes a session only reaches one the
+-- connection is attached to.
+local function attached_session(fake, session_id)
+  local session = fake:session(session_id)
+  if not session then return nil, "session_not_found" end
+  if not fake.attached[session_id] then return nil, "not attached to " .. session_id end
+  return session
 end
 
 function methods.session_destroy(fake, args)
-  if not fake:session(args.session_id) then return nil, "session_not_found" end
+  local session, err = attached_session(fake, args.session_id)
+  if not session then return nil, err end
   fake:remove_session(args.session_id)
   return {}
+end
+
+function methods.session_new_window(fake, args)
+  local session, err = attached_session(fake, args.session_id)
+  if not session then return nil, err end
+  local refused = label_refused(args.window_label)
+  if refused then return nil, refused end
+  if args.layout == nil then return nil, "bad_request" end
+  local window_id, block_id = fake:add_window(args.session_id, args.window_label, args.layout)
+  return { window_id = window_id, block_ids = { block_id }, revision = 1 }
+end
+
+function methods.session_close_window(fake, args)
+  local session, err = attached_session(fake, args.session_id)
+  if not session then return nil, err end
+  if not fake:remove_window(args.session_id, args.window_id) then return nil, "not_found" end
+  return { revision = 1 }
 end
 
 function methods.client_list(fake, args)

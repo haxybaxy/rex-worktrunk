@@ -1,6 +1,6 @@
 # rex-worktrunk
 
-Git worktree pickers for [Rex](https://www.superlogical.com/rex), powered by [worktrunk](https://github.com/max-sixty/worktrunk). One key switches to or creates a worktree, another removes one. Each worktree gets its own Rex session.
+Git worktree pickers for [Rex](https://www.superlogical.com/rex), powered by [worktrunk](https://github.com/max-sixty/worktrunk). One key switches to or creates a worktree, another removes one. Each worktree gets its own Rex session, or a tab in its repository's session.
 
 
 
@@ -13,6 +13,7 @@ https://github.com/user-attachments/assets/3f925aba-0438-4f44-abb9-08d052d9a0a2
 - **Switch or create**: fuzzy-pick a worktree or branch to jump to its session. Type a new name to create a branch and worktree. <kbd>Alt</kbd>+<kbd>Enter</kbd> forces the typed name. Worktrunk shortcuts work: `^` (default branch), `-` (previous), `pr:N`, `mr:N`, PR/MR URLs.
 - **Remove**: pick a worktree to remove. Worktrunk still refuses unmerged or dirty ones. Its session closes and you return to the session you came from.
 - **One session per worktree**: picking a worktree again reopens its session. Sessions are tracked by path, so you can rename them freely.
+- **Or one session per repository**: with `group = "tab"`, each worktree is a tab in its repository's session (see [Tabs](#tabs)).
 
 ## Install
 
@@ -43,8 +44,9 @@ require("rex-worktrunk").setup{
   slugify = false,                    -- "Fix Login Bug" becomes fix-login-bug
   bounds  = { 0.15, 0.1, 0.7, 0.8 },  -- float x, y, width, height as fractions of the window
   picker  = "float",                  -- "native" lists in Rex's command palette instead (see below), make sure your server has API v17 or later
-  label   = nil,                      -- function(path, worktree) -> label for a new session
-  layout  = nil,                      -- function(label, path, worktree) -> rex.layout for a new session
+  group   = "session",                -- "tab" opens each worktree as a tab in its repository's session (see below)
+  label   = nil,                      -- function(path, worktree) -> label for a new session or tab
+  layout  = nil,                      -- function(label, path, worktree) -> rex.layout for a new session or tab
   script  = nil,                      -- picker script (default: worktrunk.sh)
 }
 ```
@@ -72,6 +74,26 @@ require("rex-worktrunk").setup{
 
 </details>
 
+## Tabs
+
+`group = "tab"` gives each repository one session, with a tab per worktree, instead of a session per worktree:
+
+```
+app                  ← session
+  main               ← tab
+  fix-login          ← tab
+other-repo           ← session
+  main
+  fix-ci
+```
+
+- **Where tabs open**: in the session your main checkout is in, if you have picked from it there. Otherwise the plugin creates a session named after the main checkout's directory.
+- **Labels**: a tab is labelled with its branch. `label` and `layout` apply to the tab.
+- **Remove**: closes the worktree's tab and returns you to the tab you came from, or else the main checkout's tab. The session stays open. A session the plugin created is closed with its last tab.
+- **Trade-off**: a worktree is one tab, which can hold splits, rather than a session with several tabs.
+
+Changing `group` only affects worktrees opened afterwards. A worktree that already has a session or tab keeps it until it is removed.
+
 ## Native picker
 > [!NOTE] 
 > This option will become the default once more people update.
@@ -87,13 +109,15 @@ require("rex-worktrunk").setup{
 ```sh
 rex do worktree                                      # switch / create picker
 rex do worktree_remove                               # remove picker
-rex do worktree_go path=<worktree>                   # open a worktree's session
-rex do worktree_close path=<worktree> main=<repo>    # close a removed worktree's session
+rex do worktree_go path=<worktree>                   # open a worktree's session or tab
+rex do worktree_close path=<worktree> main=<repo>    # close a removed worktree's session or tab
 ```
+
+With `group = "tab"`, also pass `main=<repo>` to `worktree_go`, so the tab opens in that repository's session.
 
 ## Optional: close sessions on any `wt remove`
 
-`wt remove` and `wt merge` run outside the picker don't close the session. This hook in `~/.config/worktrunk/config.toml` handles that:
+`wt remove` and `wt merge` run outside the picker don't close the session or tab. This hook in `~/.config/worktrunk/config.toml` handles that:
 
 ```toml
 [post-remove]

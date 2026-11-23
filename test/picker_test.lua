@@ -166,6 +166,16 @@ do
 end
 
 do
+  t.check("groups by session unless told otherwise", fresh().options.group == "session")
+  local M = fresh{ group = "tab" }
+  t.check("takes the group option", M.options.group == "tab" and #fake:warnings() == 0, t.show(fake:warnings()))
+  M = fresh{ group = "window" }
+  t.check("warns about a group it doesn't know and keeps the default",
+    M.options.group == "session" and #fake:warnings() == 1
+      and fake:warnings()[1]:find('expected "session" or "tab", got "window"', 1, true), t.show(fake:warnings()))
+end
+
+do
   fresh{ script = "/opt/wt/worktrunk.sh" }
   fake.dirs = { [REPO .. ".fix"] = true }
   local opened = fake.actions.worktree_go.run(ctx, { path = REPO .. ".fix", branch = "fix" })

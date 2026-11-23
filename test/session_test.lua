@@ -439,6 +439,46 @@ do
 end
 
 --------------------------------------------------------------------------------
+t.section("what it asks of Rex")
+--------------------------------------------------------------------------------
+
+-- Every call to Rex is a round trip, and looking at a session's tabs is one
+-- more. A session per worktree needs none of those: these are the calls it
+-- made before tabs existed.
+do
+  local function calls()
+    local names = {}
+    for _, call in ipairs(fake.calls) do names[#names + 1] = call.name end
+    fake.calls = {}
+    return names
+  end
+
+  local M = fresh()
+  local home = fake:add_session("home")
+  M.go(from(home), FEAT)   -- creates the registry's directory, which the next ones find
+  calls()
+
+  local fix = M.go(from(home), FIX, { from = MAIN, branch = "fix", main = MAIN }).session_id
+  local made = calls()
+  t.check("opening a new worktree: check the directory, list sessions, create, show",
+    t.same_list(made, { "exec", "session.list", "session.create", "client.queue" }), t.show(made))
+
+  M.go(from(fix), FEAT, { from = FIX })
+  made = calls()
+  t.check("going to a known one: check the directory, list sessions, show",
+    t.same_list(made, { "exec", "session.list", "client.queue" }), t.show(made))
+
+  M.close(from(fix), FIX, MAIN)
+  made = calls()
+  t.check("closing one the app is viewing: list sessions, show, attach, destroy",
+    t.same_list(made, { "session.list", "client.queue", "session.attach", "session.destroy" }), t.show(made))
+
+  M.close(from(home), "/src/unknown", MAIN)
+  made = calls()
+  t.check("closing an unknown one: list sessions", t.same_list(made, { "session.list" }), t.show(made))
+end
+
+--------------------------------------------------------------------------------
 t.section("the registry file")
 --------------------------------------------------------------------------------
 
