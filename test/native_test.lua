@@ -277,6 +277,32 @@ do
 end
 
 do
+  -- group = "tab": the pick comes from a tab in FEAT, so the repo has no
+  -- session yet and gets one, with the main checkout as its first tab.
+  local M = fresh{ group = "tab" }
+  local ctx = key_ctx()
+  local came_from = fake:window_ids(ctx.session_id)[1]
+  fake:answer("main")
+  local result = M.open(ctx)
+  t.check("with group = \"tab\", an existing worktree opens as a tab in the repo's session",
+    result.created and result.window_id ~= nil and fake:session(result.session_id).label == "app"
+      and t.same_list(fake:window_labels(result.session_id), { "main" })
+      and t.same_list(fake:shown(), { result.session_id .. "/" .. result.window_id }) and #floats() == 0,
+    t.show(fake:shown()))
+  t.check("remembering the tab it was picked from, adopted for the worktree it was in",
+    t.same_list(fake:registry_lines(), {
+      MAIN .. "\t" .. result.session_id .. "\t\trepo",
+      MAIN .. "\t" .. result.session_id .. "\t" .. ctx.session_id .. "\t\t" .. result.window_id .. "\t" .. came_from,
+      FEAT .. "\t" .. ctx.session_id .. "\t\tadopted\t" .. came_from,
+    }), t.show(fake:registry_lines()))
+
+  fake:answer("feat")
+  local back = M.open({ origin = "key", session_id = result.session_id, block_id = "block:focused" })
+  t.check("and picking the worktree it came from goes back to that tab",
+    not back.created and back.session_id == ctx.session_id and back.window_id == came_from)
+end
+
+do
   local M = fresh{ label = function(_, worktree) return worktree.branch .. "@" .. worktree.main end }
   fake:answer("main")
   local result = M.open(key_ctx())
