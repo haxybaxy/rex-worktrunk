@@ -100,6 +100,18 @@ do
 end
 
 do
+  local calls = {}
+  local M = fresh{ on_created = function(result, worktree) calls[#calls + 1] = { result, worktree } end }
+  local home = fake:add_session("home")
+  local fix = M.go(from(home), FIX, request("fix/login"))
+  t.check("calls on_created for a new worktree tab",
+    #calls == 1 and calls[1][1].window_id == fix.window_id and calls[1][1].created == true
+      and calls[1][2].path == FIX and calls[1][2].branch == "fix/login" and calls[1][2].main == MAIN)
+  M.go(from(home), FIX, request("fix/login"))
+  t.check("doesn't call on_created when the tab is reopened", #calls == 1)
+end
+
+do
   local M = fresh()
   local lookalike = fake:add_session("app")
   local fix = M.go(from(nil), FIX, request("fix"))

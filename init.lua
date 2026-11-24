@@ -96,6 +96,13 @@ M.options = {
   -- default, and the fallback for a nil, empty, failing or refused result, is
   -- the directory's name; a tab is labelled with the branch when it is known.
   label = nil,
+  -- function(result, worktree) called after a worktree's session or tab is
+  -- created and shown, never when an existing one is reopened. result is what
+  -- worktree_go returns (session_id, window_id, path, created); worktree is
+  -- the table described below. The connection is not attached to the new
+  -- session; rex.call("session.attach", …) first to act on it. An error is
+  -- logged as a warning and doesn't fail the action.
+  on_created = nil,
   -- The picker script. Defaults to worktrunk.sh beside this file.
   script = nil,
 }
@@ -116,6 +123,7 @@ local OPTION_TYPES = {
   group   = { "string" },
   layout  = { "function" },
   label   = { "function" },
+  on_created = { "function" },
   script  = { "string" },
 }
 
@@ -1002,6 +1010,7 @@ function M.go(ctx, path, request)
   local entries = registry.entries
   local here = request_place(ctx, registry)
   local created = false
+  local worktree
 
   local from = request.from and normalize_path(request.from)
   if here and from and is_trackable(from) then Registry.adopt(registry, from, here) end
@@ -1012,7 +1021,7 @@ function M.go(ctx, path, request)
     entry = entries[path]
   end
   if entry == nil then
-    local worktree = {
+    worktree = {
       path   = path,
       branch = request.branch,
       main   = request.main and normalize_path(request.main),
@@ -1035,7 +1044,12 @@ function M.go(ctx, path, request)
   if not ok then
     raise("session for " .. path .. " is ready, but the app would not show it: " .. tostring(err))
   end
-  return { session_id = entry.session, window_id = entry.window, path = path, created = created }
+  local result = { session_id = entry.session, window_id = entry.window, path = path, created = created }
+  if created and M.options.on_created then
+    local cok, cerr = pcall(M.options.on_created, result, worktree)
+    if not cok then warn("on_created failed: " .. tostring(cerr)) end
+  end
+  return result
 end
 
 -- Close the session or tab this plugin created for a removed worktree. When
