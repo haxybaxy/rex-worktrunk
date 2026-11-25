@@ -45,6 +45,8 @@
 --   and the tab a picker is used from is adopted and never closed.
 --   The option only decides how a worktree that has no place yet gets one. A
 --   session or tab that is already remembered is used as it is.
+--   The session option can choose another session for a new tab: "current",
+--   the one the request came from, or a function returning a session's ID.
 --
 -- How the pickers hand back:
 --   picker = "float", the default: the float runs worktrunk.sh, which picks
@@ -87,6 +89,12 @@ M.options = {
   -- own; "tab" gives each repository one session, and each of its worktrees a
   -- tab in it. See Worktree tabs below.
   group = "session",
+  -- With group = "tab", the session a new tab opens in: "current" for the
+  -- session the request came from, or function(worktree, ctx) returning a
+  -- session's ID. nil, from either, opens it in its repository's session. A
+  -- session chosen this way is not remembered as the repository's. See
+  -- Worktree tabs below.
+  session = nil,
   -- function(label, path, worktree) returning the layout for a new session or
   -- tab, built with rex.layout. The default is one shell started in the
   -- worktree.
@@ -114,6 +122,7 @@ local OPTION_TYPES = {
   bounds  = { "table" },
   picker  = { "string" },
   group   = { "string" },
+  session = { "string", "function" },
   layout  = { "function" },
   label   = { "function" },
   script  = { "string" },
@@ -121,8 +130,9 @@ local OPTION_TYPES = {
 
 -- The values that the options with a fixed set of them take.
 local CHOICES = {
-  picker = { "float", "native" },
-  group  = { "session", "tab" },
+  picker  = { "float", "native" },
+  group   = { "session", "tab" },
+  session = { "current" },
 }
 
 local SHELL_FLAVOR     = "com.superlogical.terminal.shell"
@@ -633,26 +643,60 @@ end
 --   * a new session, labelled after the main checkout's directory, with the
 --     worktree's tab as its first.
 -- A request that doesn't say the main checkout is grouped under the worktree
--- itself.
+-- itself. The session option goes before all of these, for one tab at a time:
+-- the session it chooses is not the repository's, so it is never closed with
+-- its last tab.
 --------------------------------------------------------------------------------
 
--- Open a tab for a worktree in its repository's session, creating the session
--- if the repository has none. Returns the worktree's registry entry.
-local function open_tab(registry, worktree)
+-- The live session the session option chooses for a worktree's tab, or nil.
+-- Never call it inside pcall: the function may ask with rex.ui.pick.
+local function chosen_session(registry, worktree, ctx)
+  local choose = M.options.session
+  if choose == nil then return nil end
+  local session_id
+  if choose == "current" then
+    session_id = ctx.session_id
+  else
+    session_id = choose(worktree, ctx)
+  end
+  if session_id == nil then return nil end
+  if type(session_id) == "string" and registry.live[session_id] then return session_id end
+  if choose ~= "current" then
+    warn("session function returned " .. tostring(session_id)
+      .. ", which is not a live session; using the repository's")
+  end
+  return nil
+end
+
+-- Open a tab in a session the connection is attached to. Returns its ID.
+local function new_tab(session_id, labels, layout)
+  local opened = create_labelled("tab", labels, function(label)
+    return rex.call("session.new_window", { session_id = session_id, window_label = label, layout = layout })
+  end)
+  return opened.window_id
+end
+
+-- Open a tab for a worktree in the session the session option chooses, else
+-- in its repository's session, creating that if the repository has none.
+-- Returns the worktree's registry entry.
+local function open_tab(registry, worktree, ctx)
+  local chosen = chosen_session(registry, worktree, ctx)
   local main = worktree.main
   if not (main and is_trackable(main)) then main = worktree.path end
   local labels = labels_for(worktree, true)
   local layout = worktree_layout(labels[1], worktree)
 
+  -- Looking at a session attaches to it, which new_tab needs.
+  if chosen and Registry.tabs(registry, chosen) then
+    return { session = chosen, window = new_tab(chosen, labels, layout) }
+  end
+
   local repo, main_entry = registry.repos[main], registry.entries[main]
   local session_id = repo and repo.session or (main_entry and main_entry.session)
-  -- Looking at the session attaches to it, which the call below needs.
   if session_id and Registry.tabs(registry, session_id) then
-    local opened = create_labelled("tab", labels, function(label)
-      return rex.call("session.new_window", { session_id = session_id, window_label = label, layout = layout })
-    end)
+    local window_id = new_tab(session_id, labels, layout)
     if not repo then registry.repos[main] = { session = session_id, adopted = true } end
-    return { session = session_id, window = opened.window_id }
+    return { session = session_id, window = window_id }
   end
 
   local created = create_labelled("tab", labels, function(label)
@@ -1018,7 +1062,7 @@ function M.go(ctx, path, request)
       main   = request.main and normalize_path(request.main),
     }
     if M.options.group == "tab" then
-      entry = open_tab(registry, worktree)
+      entry = open_tab(registry, worktree, ctx)
     else
       entry = { session = create_session(worktree) }
     end
@@ -1124,7 +1168,7 @@ function M.setup(opts)
     elseif not fits then
       warn("ignoring option " .. name .. ": expected a " .. table.concat(types, " or ")
         .. ", got a " .. type(value))
-    elseif CHOICES[name] and not contains(CHOICES[name], value) then
+    elseif CHOICES[name] and type(value) == "string" and not contains(CHOICES[name], value) then
       warn("ignoring option " .. name .. ': expected "' .. table.concat(CHOICES[name], '" or "')
         .. '", got "' .. value .. '"')
     else

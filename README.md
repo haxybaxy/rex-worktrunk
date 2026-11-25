@@ -45,6 +45,7 @@ require("rex-worktrunk").setup{
   bounds  = { 0.15, 0.1, 0.7, 0.8 },  -- float x, y, width, height as fractions of the window
   picker  = "float",                  -- "native" lists in Rex's command palette instead (see below), make sure your server has API v17 or later
   group   = "session",                -- "tab" opens each worktree as a tab in its repository's session (see below)
+  session = nil,                      -- with group = "tab": "current" or function(worktree, ctx) -> session ID for a new tab
   label   = nil,                      -- function(path, worktree) -> label for a new session or tab
   layout  = nil,                      -- function(label, path, worktree) -> rex.layout for a new session or tab
   script  = nil,                      -- picker script (default: worktrunk.sh)
@@ -93,6 +94,36 @@ other-repo           ← session
 - **Trade-off**: a worktree is one tab, which can hold splits, rather than a session with several tabs.
 
 Changing `group` only affects worktrees opened afterwards. A worktree that already has a session or tab keeps it until it is removed.
+
+### Session option
+
+`session` picks the session a new tab opens in, for those who group sessions by something other than repository:
+
+- `"current"` opens it in the session you picked from.
+- A function `function(worktree, ctx)` returns a session ID. `ctx` is the action's context, with `session_id` the session the request came from. The function may ask with `rex.ui.pick`.
+- `nil`, from either, opens it in the repository's session as above.
+
+A session chosen this way isn't remembered as the repository's. The plugin closes it with its last tab only if the plugin created it. Existing tabs stay where they are.
+
+<details>
+<summary>Example: ask which session</summary>
+
+```lua
+require("rex-worktrunk").setup{
+  group = "tab",
+  session = function(wt, ctx)
+    local items = {}
+    for _, s in ipairs(rex.call("session.list").sessions) do
+      items[#items + 1] = { id = s.session_id, title = s.label }
+    end
+    return rex.ui.pick{ title = "Open " .. (wt.branch or wt.path) .. " in", items = items }
+  end,
+}
+```
+
+Cancelling the prompt returns `nil`, which opens the tab in the repository's session.
+
+</details>
 
 ## Native picker
 > [!NOTE] 
