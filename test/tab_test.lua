@@ -412,6 +412,97 @@ do
 end
 
 --------------------------------------------------------------------------------
+t.section("the session option")
+--------------------------------------------------------------------------------
+
+do
+  local M = fresh{ session = "current" }
+  local area, area_tab, block = own_session("area")
+  local fix = M.go(from(area, "key", block), FIX, request("fix"))
+  t.check('"current" opens the tab in the session the request came from',
+    fix.created and fix.session_id == area and #fake.sessions == 1
+      and t.same_list(fake:window_ids(area), { area_tab, fix.window_id }), t.show(fake:window_ids(area)))
+  t.check("without remembering it as the repo's session",
+    t.same_list(fake:registry_lines(), {
+      FIX .. "\t" .. area .. "\t" .. area .. "\t\t" .. fix.window_id .. "\t" .. area_tab,
+    }), t.show(fake:registry_lines()))
+
+  local feat = M.go(from(nil), FEAT, request("feat"))
+  t.check("and falls back to the repo's session when the request has none",
+    feat.created and feat.session_id ~= area and fake:session(feat.session_id).label == "app")
+
+  local again = M.go(from(feat.session_id), FIX, request("fix"))
+  t.check("a worktree keeps its tab when picked from another session",
+    again.window_id == fix.window_id and not again.created)
+end
+
+do
+  local seen
+  local M = fresh{ session = function(worktree, ctx)
+    seen = { worktree, ctx }
+    local answer = rex.ui.pick{ items = {} }
+    return answer
+  end }
+  local area = fake:add_session("area")
+  local home = fake:add_session("home")
+  fake:answer(area)
+  local ctx = from(home)
+  local fix = M.go(ctx, FIX, request("fix"))
+  t.check("a function chooses the session, and may ask to",
+    fix.created and fix.session_id == area and #fake:calls_to("ui.pick") == 1 and #fake.sessions == 2)
+  t.check("given the worktree and the request's context",
+    seen and seen[1].path == FIX and seen[1].branch == "fix" and seen[1].main == MAIN and seen[2] == ctx)
+
+  M.go(ctx, FIX, request("fix"))
+  t.check("and isn't asked again for a worktree that has a tab", #fake:calls_to("ui.pick") == 1)
+end
+
+for _, case in ipairs{
+  { name = "nil",              returns = function() return nil end,              warnings = 0 },
+  { name = "a closed session", returns = function() return "session:gone" end,  warnings = 1 },
+  { name = "a non-string",     returns = function() return 42 end,              warnings = 1 },
+} do
+  local M = fresh{ session = case.returns }
+  local fix = M.go(from(nil), FIX, request("fix"))
+  t.check("a function returning " .. case.name .. " opens the tab in the repo's session",
+    fix.created and fake:session(fix.session_id).label == "app" and #fake:warnings() == case.warnings,
+    t.show(fake:warnings()))
+end
+
+do
+  local M = fresh{ session = "current" }
+  local area, area_tab = own_session("area")
+  local fix = M.go(from(area), FIX, request("fix"))
+  fake:remove_window(area, area_tab)
+  local result = M.close(from(nil), FIX, MAIN)
+  t.check("closing the last tab never closes a session it chose",
+    result.closed and fake:session(area) ~= nil and #fake:window_ids(area) == 0
+      and fake:window(area, fix.window_id) == nil)
+end
+
+do
+  local M = fresh()
+  local area = fake:add_session("area")
+  local repo_session = M.go(from(nil), FIX, request("fix")).session_id
+  local N = t.load_plugin{ group = "tab", session = function() return repo_session end }
+  local feat = N.go(from(area), FEAT, { main = "/src/other", branch = "feat" })
+  N.close(from(nil), FIX, MAIN)
+  t.check("a tab in a session the plugin created for a repo keeps it open",
+    feat.session_id == repo_session and fake:session(repo_session) ~= nil)
+  N.close(from(nil), FEAT, "/src/other")
+  t.check("until that session's last tab is closed", fake:session(repo_session) == nil)
+end
+
+for _, case in ipairs{
+  { name = '"pick"', value = "pick" },
+  { name = "a number", value = 1 },
+} do
+  local M = fresh{ session = case.value }
+  t.check("setup ignores session = " .. case.name .. ", with a warning",
+    M.options.session == nil and #fake:warnings() == 1, t.show(fake:warnings()))
+end
+
+--------------------------------------------------------------------------------
 t.section("changing the group option")
 --------------------------------------------------------------------------------
 
