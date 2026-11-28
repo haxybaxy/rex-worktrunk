@@ -47,18 +47,14 @@ require("rex-worktrunk").setup{
   group   = "session",                -- "tab" opens each worktree as a tab in its repository's session (see below)
   label   = nil,                      -- function(path, worktree) -> label for a new session or tab
   layout  = nil,                      -- function(label, path, worktree) -> rex.layout for a new session or tab
-  on_created = nil,                   -- function(result, worktree) called after a new session or tab is created, not when one is reopened
+  on_created = nil,                   -- function(result, worktree) called after a new session or tab is created
   script  = nil,                      -- picker script (default: worktrunk.sh)
 }
 ```
 
 `worktree` is a table with `path`, `branch` and `main` (the main checkout).
 
-`on_created(result, worktree)` runs once a new session or tab has been created and the app was asked to show it, never when an existing one is reopened. `result` is what `worktree_go` returns (`session_id`, `window_id`, `path`, `created`).
-
-- The connection may not be attached to the session, so call `rex.call("session.attach", { session_id = result.session_id })` before acting on it.
-- An error in the hook is logged as a warning and doesn't fail the action. The hook can't ask with `rex.ui.pick` or `rex.ui.input`.
-- With `group = "tab"`, `result.session_id` is the repository's session and `result.window_id` is the worktree's tab. A tab the hook opens isn't tracked: it stays when the worktree is removed, and keeps a session the plugin created from closing.
+`on_created` gets what `worktree_go` returns as `result`. Call `rex.call("session.attach", { session_id = result.session_id })` before acting on the session. With `group = "tab"`, tabs the hook opens aren't closed with the worktree.
 
 <details>
 <summary>Example: custom label and layout</summary>
