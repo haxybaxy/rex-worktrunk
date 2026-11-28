@@ -47,11 +47,14 @@ require("rex-worktrunk").setup{
   group   = "session",                -- "tab" opens each worktree as a tab in its repository's session (see below)
   label   = nil,                      -- function(path, worktree) -> label for a new session or tab
   layout  = nil,                      -- function(label, path, worktree) -> rex.layout for a new session or tab
+  on_created = nil,                   -- function(result, worktree) called after a new session or tab is created
   script  = nil,                      -- picker script (default: worktrunk.sh)
 }
 ```
 
 `worktree` is a table with `path`, `branch` and `main` (the main checkout).
+
+`on_created` gets what `worktree_go` returns as `result`. Call `rex.call("session.attach", { session_id = result.session_id })` before acting on the session. With `group = "tab"`, tabs the hook opens aren't closed with the worktree.
 
 <details>
 <summary>Example: custom label and layout</summary>

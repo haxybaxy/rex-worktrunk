@@ -148,6 +148,64 @@ do
     err and err:find("layout function failed", 1, true) and #fake.sessions == 0, err)
 end
 
+do
+  local calls, selected_at_call = {}, nil
+  local M
+  M = fresh{ on_created = function(result, worktree)
+    calls[#calls + 1] = { result, worktree }
+    selected_at_call = fake:selected()
+  end }
+  local home = fake:add_session("home")
+  local first = M.go(from(home), FIX, { branch = "fix/login", main = MAIN .. "/" })
+  t.check("calls on_created once with the result and the worktree when a session is created",
+    #calls == 1 and calls[1][1].session_id == first.session_id and calls[1][1].created == true
+      and calls[1][1].path == FIX and calls[1][2].path == FIX and calls[1][2].branch == "fix/login"
+      and calls[1][2].main == MAIN)
+  t.check("calls on_created after the app was told to show the session",
+    selected_at_call and t.same_list(selected_at_call, { first.session_id }), t.show(selected_at_call or {}))
+
+  M.go(from(home), FIX)
+  t.check("doesn't call on_created when the session is reopened", #calls == 1)
+
+  fake:remove_session(first.session_id)
+  M.go(from(home), FIX)
+  t.check("calls on_created again when the session is created again", #calls == 2)
+end
+
+do
+  local M = fresh{ on_created = function() error("boom") end }
+  local opened, err = nil, nil
+  err = t.error_of(function() opened = M.go(from(nil), FIX) end)
+  t.check("logs a warning and still returns the result when on_created fails",
+    err == nil and opened and opened.created and #fake.sessions == 1 and #fake:warnings() == 1
+      and fake:warnings()[1]:find("on_created failed", 1, true) ~= nil,
+    err or t.show(fake:warnings()))
+end
+
+do
+  local calls = 0
+  local M = fresh{ on_created = function() calls = calls + 1 end }
+  local home = fake:add_session("home")
+  fake.queue_fails = "no client"
+  local err = t.error_of(M.go, from(home), FIX)
+  t.check("calls on_created for a new session the app would not show",
+    calls == 1 and err and err:find("would not show it", 1, true) ~= nil, "calls = " .. calls)
+  fake.queue_fails = nil
+  local again = M.go(from(home), FIX)
+  t.check("and not again when that session is shown later", calls == 1 and not again.created,
+    "calls = " .. calls)
+end
+
+do
+  local calls = 0
+  local M = fresh{ on_created = function() calls = calls + 1 end }
+  fake:add_app({}, "remote control is off")
+  local err = t.error_of(M.go, from(nil, "cli"), FIX)
+  t.check("from the CLI, calls on_created when no app will show the session",
+    calls == 1 and err and err:find("would not show it: remote control is off", 1, true) ~= nil,
+    err or ("calls = " .. calls))
+end
+
 --------------------------------------------------------------------------------
 t.section("remembering where a worktree was opened from")
 --------------------------------------------------------------------------------
