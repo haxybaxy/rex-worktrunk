@@ -112,6 +112,18 @@ do
 end
 
 do
+  local calls = 0
+  local M = fresh{ on_created = function() calls = calls + 1 end }
+  local home = fake:add_session("home")
+  fake.queue_fails = "no client"
+  local err = t.error_of(M.go, from(home), FIX, request("fix"))
+  fake.queue_fails = nil
+  M.go(from(home), FIX, request("fix"))
+  t.check("calls on_created once for a new tab the app would not show at first",
+    calls == 1 and err and err:find("would not show it", 1, true) ~= nil, "calls = " .. calls)
+end
+
+do
   local M = fresh()
   local lookalike = fake:add_session("app")
   local fix = M.go(from(nil), FIX, request("fix"))

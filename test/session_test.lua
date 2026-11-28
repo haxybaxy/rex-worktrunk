@@ -182,6 +182,30 @@ do
     err or t.show(fake:warnings()))
 end
 
+do
+  local calls = 0
+  local M = fresh{ on_created = function() calls = calls + 1 end }
+  local home = fake:add_session("home")
+  fake.queue_fails = "no client"
+  local err = t.error_of(M.go, from(home), FIX)
+  t.check("calls on_created for a new session the app would not show",
+    calls == 1 and err and err:find("would not show it", 1, true) ~= nil, "calls = " .. calls)
+  fake.queue_fails = nil
+  local again = M.go(from(home), FIX)
+  t.check("and not again when that session is shown later", calls == 1 and not again.created,
+    "calls = " .. calls)
+end
+
+do
+  local calls = 0
+  local M = fresh{ on_created = function() calls = calls + 1 end }
+  fake:add_app({}, "remote control is off")
+  local err = t.error_of(M.go, from(nil, "cli"), FIX)
+  t.check("from the CLI, calls on_created when no app will show the session",
+    calls == 1 and err and err:find("would not show it: remote control is off", 1, true) ~= nil,
+    err or ("calls = " .. calls))
+end
+
 --------------------------------------------------------------------------------
 t.section("remembering where a worktree was opened from")
 --------------------------------------------------------------------------------

@@ -97,11 +97,16 @@ M.options = {
   -- the directory's name; a tab is labelled with the branch when it is known.
   label = nil,
   -- function(result, worktree) called after a worktree's session or tab is
-  -- created and shown, never when an existing one is reopened. result is what
-  -- worktree_go returns (session_id, window_id, path, created); worktree is
-  -- the table described below. The connection is not attached to the new
-  -- session; rex.call("session.attach", …) first to act on it. An error is
-  -- logged as a warning and doesn't fail the action.
+  -- created and the app was asked to show it, even if the app refused; never
+  -- when an existing one is reopened. result is what worktree_go returns
+  -- (session_id, window_id, path, created); worktree is the table described
+  -- below. The connection may not be attached to the session;
+  -- rex.call("session.attach", …) first to act on it. It runs inside pcall:
+  -- an error is logged as a warning and doesn't fail the action, and the
+  -- hook can't ask with rex.ui. With group = "tab", session_id is the
+  -- repository's session and window_id the worktree's tab; a tab the hook
+  -- opens is not tracked, so it outlives the worktree and keeps its session
+  -- open.
   on_created = nil,
   -- The picker script. Defaults to worktrunk.sh beside this file.
   script = nil,
@@ -1040,14 +1045,16 @@ function M.go(ctx, path, request)
   end
   if registry.changed then Registry.save(registry) end
 
-  local ok, err = pcall(show_session_in_app, ctx, entry.session, entry.window)
-  if not ok then
-    raise("session for " .. path .. " is ready, but the app would not show it: " .. tostring(err))
-  end
+  local shown, err = pcall(show_session_in_app, ctx, entry.session, entry.window)
   local result = { session_id = entry.session, window_id = entry.window, path = path, created = created }
+  -- Before raising: the new place is remembered either way, so the next
+  -- request reopens it and this is the hook's only turn.
   if created and M.options.on_created then
-    local cok, cerr = pcall(M.options.on_created, result, worktree)
-    if not cok then warn("on_created failed: " .. tostring(cerr)) end
+    local ok, hook_err = pcall(M.options.on_created, result, worktree)
+    if not ok then warn("on_created failed: " .. tostring(hook_err)) end
+  end
+  if not shown then
+    raise("session for " .. path .. " is ready, but the app would not show it: " .. tostring(err))
   end
   return result
 end
